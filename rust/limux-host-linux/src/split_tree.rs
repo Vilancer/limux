@@ -148,6 +148,7 @@ pub(crate) struct SplitTreeContainer {
     bin: gtk::Box,
     rebuild_source: RefCell<Option<glib::SourceId>>,
     teardown_pending: Cell<bool>,
+    after_rebuild: RefCell<Vec<Box<dyn FnOnce()>>>,
     last_focused: RefCell<Option<gtk::Widget>>,
     zoomed_pane: RefCell<Option<gtk::Widget>>,
     state: State,
@@ -168,6 +169,7 @@ impl SplitTreeContainer {
             bin,
             rebuild_source: RefCell::new(None),
             teardown_pending: Cell::new(false),
+            after_rebuild: RefCell::default(),
             last_focused: RefCell::new(None),
             zoomed_pane: RefCell::new(None),
             state: state.clone(),
@@ -189,6 +191,7 @@ impl SplitTreeContainer {
             bin,
             rebuild_source: RefCell::new(None),
             teardown_pending: Cell::new(false),
+            after_rebuild: RefCell::default(),
             last_focused: RefCell::new(None),
             zoomed_pane: RefCell::new(None),
             state: state.clone(),
@@ -329,6 +332,17 @@ impl SplitTreeContainer {
         removed
     }
 
+    /// Run `f` once the widget tree matches the model: at once, or after the
+    /// pending rebuild. Until then a new pane is in the model only, and pane
+    /// lookups, which search the workspace root, cannot find it.
+    pub(crate) fn after_pending_rebuild(&self, f: impl FnOnce() + 'static) {
+        if self.teardown_pending.get() || self.rebuild_source.borrow().is_some() {
+            self.after_rebuild.borrow_mut().push(Box::new(f));
+        } else {
+            f();
+        }
+    }
+
     /// Tear down the old widget tree and schedule a rebuild on the next idle
     /// tick. The one-tick separation between unrealize (teardown) and realize
     /// (rebuild) is what prevents GLArea breakage. The teardown itself waits
@@ -376,6 +390,13 @@ impl SplitTreeContainer {
         let source = glib::idle_add_local_full(glib::Priority::HIGH, move || {
             container.rebuild_source.replace(None);
             container.do_rebuild();
+            // Unless it had to queue another pass.
+            if container.rebuild_source.borrow().is_none() {
+                let waiting = container.after_rebuild.take();
+                for f in waiting {
+                    f();
+                }
+            }
             glib::ControlFlow::Break
         });
         self.rebuild_source.replace(Some(source));

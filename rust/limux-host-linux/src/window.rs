@@ -5444,15 +5444,15 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 }
             };
 
-            let workspace_name = {
+            let workspace = {
                 let app_state = state.borrow();
                 app_state
                     .workspaces
                     .iter()
                     .find(|workspace| workspace.id == resolved.workspace_id)
-                    .map(|workspace| workspace.name.clone())
+                    .map(|workspace| (workspace.name.clone(), workspace.split_container.clone()))
             };
-            let Some(workspace_name) = workspace_name else {
+            let Some((workspace_name, split_container)) = workspace else {
                 let _ = reply.send(Err(BridgeError::not_found("workspace not found")));
                 return;
             };
@@ -5496,7 +5496,10 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 return;
             }
 
-            let _ = reply.send(Ok(response));
+            // The caller may target the new pane as soon as it has the reply.
+            split_container.after_pending_rebuild(move || {
+                let _ = reply.send(Ok(response));
+            });
         }
         ControlCommand::ListSurfaces { target, reply } => {
             let resolved = {
@@ -6507,17 +6510,19 @@ fn close_workspace_by_id_internal(
     s.active_idx = new_idx;
     sync_indicator_active_state(&s);
 
-    // Show the new active workspace before hiding the old one: GtkStack maps
-    // its first child the instant the visible child is hidden, so showing
-    // the replacement first keeps that first child from flashing on screen
-    // (see `terminal::detach_after_repaint`).
+    let stack = s.stack.clone();
     let stack_name = format!("ws-{}", s.workspaces[new_idx].id);
-    s.stack.set_visible_child_name(&stack_name);
-
     let row = s.workspaces[new_idx].sidebar_row.clone();
     let sidebar_list = s.sidebar_list.clone();
     drop(s);
 
+    // Show the new active workspace before hiding the old one: GtkStack maps
+    // its first child the instant the visible child is hidden, so showing
+    // the replacement first keeps that first child from flashing on screen
+    // (see `terminal::detach_after_repaint`). The switch unmaps the old root,
+    // and the crossing event it sends to the terminal under the pointer reads
+    // the state, so it runs without the borrow.
+    stack.set_visible_child_name(&stack_name);
     crate::terminal::remove_from_stack_after_repaint(&ws.root);
     sidebar_list.select_row(Some(&row));
     apply_top_bar_mode(state);
@@ -9020,3 +9025,7 @@ mod ssh_launch_tests;
 #[cfg(test)]
 #[path = "tab_move_tests.rs"]
 mod tab_move_tests;
+
+#[cfg(test)]
+#[path = "pane_create_tests.rs"]
+mod pane_create_tests;
