@@ -857,14 +857,7 @@ pub fn rename_tab_in_pane(pane_widget: &gtk::Widget, tab_id: &str, title: &str) 
         return false;
     };
 
-    let trimmed = title.trim();
-    if trimmed.is_empty() {
-        entry.custom_name = None;
-        entry.title_label.set_text(entry.kind.default_title());
-    } else {
-        entry.custom_name = Some(trimmed.to_string());
-        entry.title_label.set_text(trimmed);
-    }
+    entry.rename(title);
     true
 }
 
@@ -1044,12 +1037,24 @@ struct TabEntry {
     unread_dot: gtk::Label,
     content: gtk::Widget,
     custom_name: Option<String>,
+    automatic_title: Option<String>,
     pinned: bool,
     unread: bool,
     kind: TabKind,
 }
 
 impl TabEntry {
+    fn rename(&mut self, title: &str) {
+        let title = title.trim();
+        self.custom_name = (!title.is_empty()).then(|| title.to_string());
+        self.title_label.set_text(
+            self.custom_name
+                .as_deref()
+                .or(self.automatic_title.as_deref())
+                .unwrap_or_else(|| self.kind.default_title()),
+        );
+    }
+
     fn prepare_for_removal(&self) {
         match &self.kind {
             TabKind::Terminal { state } => state.handle.shutdown(),
@@ -1286,15 +1291,16 @@ fn make_terminal_callbacks(
 
     TerminalCallbacks {
         on_title_changed: Box::new(move |title: &str| {
-            let has_custom = state_for_title
-                .borrow()
-                .tabs
-                .iter()
-                .any(|entry| entry.id == tid_for_title && entry.custom_name.is_some());
-            if has_custom || title.is_empty() {
+            if title.is_empty() {
                 return;
             }
             let display = display_terminal_title(title);
+            if let Some(entry) = state_for_title.borrow_mut().find_tab_mut(&tid_for_title) {
+                entry.automatic_title = Some(display.clone());
+                if entry.custom_name.is_some() {
+                    return;
+                }
+            }
             title_label.set_label(&display);
         }),
         on_pwd_changed: Box::new(move |pwd: &str| {
@@ -1592,6 +1598,7 @@ fn add_terminal_tab_inner(
             custom_name: options
                 .as_ref()
                 .and_then(|value| value.custom_name.map(|name| name.to_string())),
+            automatic_title: None,
             pinned: options.as_ref().map(|value| value.pinned).unwrap_or(false),
             unread: false,
             kind: TabKind::Terminal {
@@ -1770,6 +1777,7 @@ fn add_browser_tab_inner(internals: &Rc<PaneInternals>, options: Option<BrowserT
             custom_name: options
                 .as_ref()
                 .and_then(|value| value.custom_name.map(|name| name.to_string())),
+            automatic_title: Some(title),
             pinned: options.as_ref().map(|value| value.pinned).unwrap_or(false),
             unread: false,
             kind: TabKind::Browser {
@@ -1841,6 +1849,7 @@ fn add_keybind_editor_tab_inner(internals: &Rc<PaneInternals>, input: KeybindsTa
                 .options
                 .as_ref()
                 .and_then(|value| value.custom_name.map(|name| name.to_string())),
+            automatic_title: None,
             pinned: input
                 .options
                 .as_ref()
@@ -2886,13 +2895,8 @@ fn show_rename_dialog(
                 return;
             }
             commit.set(true);
-            let new_name = entry.text().to_string();
-            if !new_name.trim().is_empty() {
-                lbl.set_label(&new_name);
-                let mut ts = state.borrow_mut();
-                if let Some(tab) = ts.find_tab_mut(&tid) {
-                    tab.custom_name = Some(new_name);
-                }
+            if let Some(tab) = state.borrow_mut().find_tab_mut(&tid) {
+                tab.rename(&entry.text());
             }
             lbl.set_visible(true);
             if entry.parent().is_some() {
