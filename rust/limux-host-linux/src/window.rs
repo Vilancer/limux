@@ -3933,9 +3933,18 @@ fn build_sidebar_row(
     let top_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     top_row.append(&notify_dot);
     top_row.append(&name_label);
+
+    let favorite_button = gtk::Button::with_label("\u{2606}");
+    favorite_button.add_css_class("flat");
+    favorite_button.add_css_class("limux-ws-star-btn");
+    favorite_button.set_focus_on_click(false);
+    favorite_button.set_valign(gtk::Align::Center);
+    favorite_button.set_halign(gtk::Align::End);
+    favorite_button.set_tooltip_text(Some("Favorite workspace"));
+    top_row.append(&favorite_button);
     top_row.append(&close_button);
 
-    // Second row: path label on the left, favorite star right-aligned below the X.
+    // Second row: the workspace path, when it is enabled and available.
     let path_label = gtk::Label::builder()
         .xalign(0.0)
         .hexpand(true)
@@ -3950,19 +3959,9 @@ fn build_sidebar_row(
         path_label.set_label("");
     }
 
-    let favorite_button = gtk::Button::with_label("\u{2606}");
-    favorite_button.add_css_class("flat");
-    favorite_button.add_css_class("limux-ws-star-btn");
-    favorite_button.set_focus_on_click(false);
-    favorite_button.set_valign(gtk::Align::Center);
-    favorite_button.set_halign(gtk::Align::End);
-    favorite_button.set_tooltip_text(Some("Favorite workspace"));
-
-    path_label.set_visible(workspace_path_visible(folder_path, show_workspace_path));
-
     let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     path_row.append(&path_label);
-    path_row.append(&favorite_button);
+    set_workspace_path_row_visibility(&path_label, folder_path, show_workspace_path);
 
     let notify_label = gtk::Label::builder()
         .xalign(0.0)
@@ -3999,13 +3998,26 @@ fn workspace_path_visible(folder_path: Option<&str>, show_workspace_path: bool) 
     show_workspace_path && folder_path.is_some()
 }
 
+fn set_workspace_path_row_visibility(
+    path_label: &gtk::Label,
+    folder_path: Option<&str>,
+    show_workspace_path: bool,
+) {
+    let visible = workspace_path_visible(folder_path, show_workspace_path);
+    path_label.set_visible(visible);
+    if let Some(path_row) = path_label.parent() {
+        path_row.set_visible(visible);
+    }
+}
+
 fn sync_workspace_path_visibility(state: &State, show_workspace_path: bool) {
     let app_state = state.borrow();
     for workspace in &app_state.workspaces {
-        workspace.path_label.set_visible(workspace_path_visible(
+        set_workspace_path_row_visibility(
+            &workspace.path_label,
             workspace.folder_path.as_deref(),
             show_workspace_path,
-        ));
+        );
     }
 }
 
@@ -7927,9 +7939,11 @@ mod tests {
     use std::rc::Rc;
 
     use super::glib;
+    use super::gtk;
     use super::gtk::ffi;
     use super::gtk::gdk;
     use super::ToVariant;
+    use gtk::prelude::*;
 
     #[test]
     fn top_bar_visibility_respects_both_preferences_and_fullscreen() {
@@ -8897,6 +8911,43 @@ mod tests {
         assert!(workspace_path_visible(Some("/workspace"), true));
         assert!(!workspace_path_visible(Some("/workspace"), false));
         assert!(!workspace_path_visible(None, true));
+    }
+
+    #[test]
+    #[ignore = "requires GTK; exercised by xvfb-smoke-test.sh"]
+    fn hidden_workspace_path_does_not_reserve_sidebar_row_height() {
+        gtk::init().expect("initialize GTK");
+        let display = gtk::gdk::Display::default().expect("GTK display");
+        let provider = gtk::CssProvider::new();
+        provider.load_from_data(&super::build_window_css(1.0));
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+
+        let (hidden_path_row, _, _, _, _, path_label, _) =
+            super::build_sidebar_row("Workspace", Some("/workspace"), false);
+        let (no_path_row, ..) = super::build_sidebar_row("Workspace", None, true);
+        let row_height = |row: &gtk::ListBoxRow| row.measure(gtk::Orientation::Vertical, -1).0;
+        let no_path_height = row_height(&no_path_row);
+
+        assert_eq!(
+            row_height(&hidden_path_row),
+            no_path_height,
+            "a hidden path row should take no more space than a workspace without a path"
+        );
+        super::set_workspace_path_row_visibility(&path_label, Some("/workspace"), true);
+        assert!(
+            row_height(&hidden_path_row) > no_path_height,
+            "a visible path should add its own row height"
+        );
+        super::set_workspace_path_row_visibility(&path_label, Some("/workspace"), false);
+        assert_eq!(
+            row_height(&hidden_path_row),
+            no_path_height,
+            "hiding the path again should collapse the row immediately"
+        );
     }
 
     #[test]
