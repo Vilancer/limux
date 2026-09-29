@@ -391,7 +391,7 @@ for regression in \
   pane::tests::moved_tab_survives_either_pane_closing_before_the_next_frame \
   pane::tests::retired_pane_releases_its_tab_contents_after_a_frame \
   pane::tests::closing_the_active_tab_maps_only_its_replacement \
-  pane::tests::moved_terminal_hover_focus_follows_its_new_pane \
+  pane::tests::moved_terminal_hover_focus_reads_its_new_pane_and_spares_renames \
   split_tree::tests::split_ratio_callbacks_release_unmapped_paned \
   settings_editor::tests::interface_controls_restore_effective_values_after_save_failure \
   window::tests::hidden_workspace_path_does_not_reserve_sidebar_row_height \
@@ -400,7 +400,7 @@ for regression in \
   window::pane_create_tests::pane_create_replies_once_the_new_pane_can_be_targeted \
   window::ssh_launch_tests::ssh_launch_is_explicit_and_not_persisted \
   window::tab_move_tests::moving_a_first_tab_to_another_workspace_keeps_tab_ids_unique; do
-  cargo test --locked $CARGO_FLAGS -p limux-host-linux "$regression" \
+  timeout -k 5s 30s cargo test --locked $CARGO_FLAGS -p limux-host-linux "$regression" \
     -- --exact --ignored --test-threads=1 --nocapture
 done
 start_host host

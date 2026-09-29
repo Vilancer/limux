@@ -101,7 +101,7 @@ struct SurfaceEntry {
 
 struct ClipboardContext {
     surface: Cell<ghostty_surface_t>,
-    copy_selection_to_clipboard: Rc<dyn Fn() -> bool>,
+    callbacks: Rc<RefCell<TerminalCallbacks>>,
     url_probe: RefCell<Option<String>>,
     url_probe_active: Cell<bool>,
 }
@@ -1317,6 +1317,8 @@ pub struct TerminalCallbacks {
     pub on_split_down: Box<VoidCallback>,
     pub on_open_keybinds: Box<WidgetCallback>,
     pub identity: Box<IdentityCallback>,
+    pub hover_focus: Box<dyn Fn() -> bool>,
+    pub copy_selection_to_clipboard: Box<dyn Fn() -> bool>,
 }
 
 impl TerminalCallbacks {
@@ -1336,13 +1338,14 @@ impl TerminalCallbacks {
                 workspace_id: None,
                 surface_id: String::new(),
             }),
+            hover_focus: Box::new(|| false),
+            copy_selection_to_clipboard: Box::new(|| false),
         }
     }
 }
 
+#[derive(Default)]
 pub struct TerminalOptions {
-    pub hover_focus: Rc<dyn Fn() -> bool>,
-    pub copy_selection_to_clipboard: Rc<dyn Fn() -> bool>,
     pub saved_font_size: Option<f32>,
     pub startup_command: Option<String>,
     pub initial_input: Option<String>,
@@ -1354,19 +1357,6 @@ pub struct TerminalOptions {
     /// to call `limux identify` first. This is the foundation for the cmux
     /// agent-to-agent communication workflow.
     pub extra_env: Vec<(String, String)>,
-}
-
-impl Default for TerminalOptions {
-    fn default() -> Self {
-        Self {
-            hover_focus: Rc::new(|| false),
-            copy_selection_to_clipboard: Rc::new(|| true),
-            saved_font_size: None,
-            startup_command: None,
-            initial_input: None,
-            extra_env: Vec::new(),
-        }
-    }
 }
 
 /// Default font-size from ghostty config (cached on first access).
@@ -1520,8 +1510,6 @@ pub fn create_terminal(
     let saved_font_size = options.saved_font_size;
     let startup_command = options.startup_command;
     let initial_input = options.initial_input;
-    let hover_focus = options.hover_focus;
-    let copy_selection_to_clipboard = options.copy_selection_to_clipboard;
     let extra_env = options.extra_env;
     let callbacks = Rc::new(RefCell::new(callbacks));
     let surface_cell: Rc<RefCell<Option<ghostty_surface_t>>> = Rc::new(RefCell::new(None));
@@ -1721,7 +1709,7 @@ pub fn create_terminal(
             let mut config = unsafe { ghostty_surface_config_new() };
             let clipboard_context = Box::into_raw(Box::new(ClipboardContext {
                 surface: Cell::new(ptr::null_mut()),
-                copy_selection_to_clipboard: copy_selection_to_clipboard.clone(),
+                callbacks: callbacks.clone(),
                 url_probe: RefCell::new(None),
                 url_probe_active: Cell::new(false),
             }));
@@ -2111,12 +2099,13 @@ pub fn create_terminal(
         let surface_cell_for_enter = surface_cell.clone();
         let gl_for_focus = gl_area.clone();
         let had_focus = had_focus.clone();
+        let callbacks = callbacks.clone();
         let cursor_pos_enter = cursor_pos.clone();
         let cursor_pos_motion = cursor_pos.clone();
         let link_popover_motion = link_popover.clone();
         let motion = gtk::EventControllerMotion::new();
         motion.connect_enter(move |ctrl, x, y| {
-            if (hover_focus)() {
+            if (callbacks.borrow().hover_focus)() {
                 // Match common Hyprland/Omarchy-style focus-follows-mouse behavior:
                 // as soon as the pointer enters a terminal, focus it so typing works
                 // immediately without an extra click.
