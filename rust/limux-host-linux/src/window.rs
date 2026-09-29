@@ -1733,9 +1733,10 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
         ""
     };
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
         build_window_css(background_opacity),
         pane::PANE_CSS,
+        crate::terminal::CLIPBOARD_TOAST_CSS,
         keybind_editor::KEYBIND_EDITOR_CSS,
         crate::settings_editor::SETTINGS_CSS,
         crate::settings_editor::ui_scale_css(config),

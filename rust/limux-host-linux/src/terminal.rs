@@ -2899,38 +2899,30 @@ fn fallback_unshifted_codepoint(keyval: gtk::gdk::Key) -> u32 {
     }
 }
 
+/// Styles for the clipboard toast, installed once with the app stylesheet.
+pub(crate) const CLIPBOARD_TOAST_CSS: &str = "box.limux-toast { \
+        background: rgba(45, 45, 45, 0.95); \
+        color: white; \
+        border-radius: 6px; \
+        padding: 6px 14px; \
+        font-size: 12px; \
+    } \
+    box.limux-toast label { color: white; } \
+    box.limux-toast button { \
+        color: rgba(255,255,255,0.5); \
+        border: none; \
+        background: none; \
+        min-height: 0; min-width: 0; \
+        padding: 0 2px; \
+    } \
+    box.limux-toast button:hover { color: white; }";
+
 /// Show a brief "Copied to clipboard" toast at the bottom of the terminal.
 fn show_clipboard_toast(overlay: &gtk::Overlay) {
     let toast = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     toast.set_halign(gtk::Align::Center);
     toast.set_valign(gtk::Align::End);
     toast.set_margin_bottom(12);
-
-    let provider = gtk::CssProvider::new();
-    provider.load_from_data(
-        "box.limux-toast { \
-            background: rgba(45, 45, 45, 0.95); \
-            color: white; \
-            border-radius: 6px; \
-            padding: 6px 14px; \
-            font-size: 12px; \
-        } \
-        box.limux-toast label { color: white; } \
-        box.limux-toast button { \
-            color: rgba(255,255,255,0.5); \
-            border: none; \
-            background: none; \
-            min-height: 0; min-width: 0; \
-            padding: 0 2px; \
-        } \
-        box.limux-toast button:hover { color: white; }",
-    );
-    gtk::style_context_add_provider_for_display(
-        &gtk::gdk::Display::default().expect("display"),
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
-
     toast.add_css_class("limux-toast");
     let label = gtk::Label::new(Some("Copied to clipboard"));
     let close_btn = gtk::Button::with_label("\u{00D7}"); // ×
@@ -2940,26 +2932,29 @@ fn show_clipboard_toast(overlay: &gtk::Overlay) {
 
     overlay.add_overlay(&toast);
 
+    // Both handlers hold weak refs: the close button is the toast's child, so
+    // a strong one would pin the toast and, through it, the terminal overlay.
+    let dismiss = {
+        let toast = toast.downgrade();
+        let overlay = overlay.downgrade();
+        move || {
+            if let (Some(toast), Some(overlay)) = (toast.upgrade(), overlay.upgrade()) {
+                if toast.parent().as_ref() == Some(overlay.upcast_ref()) {
+                    overlay.remove_overlay(&toast);
+                }
+            }
+        }
+    };
+
     // Close button dismisses immediately
-    {
-        let t = toast.clone();
-        let o = overlay.clone();
-        close_btn.set_can_target(true);
-        close_btn.connect_clicked(move |_| {
-            o.remove_overlay(&t);
-        });
-    }
+    close_btn.set_can_target(true);
+    close_btn.connect_clicked({
+        let dismiss = dismiss.clone();
+        move |_| dismiss()
+    });
 
     // Auto-dismiss after 2 seconds
-    {
-        let t = toast.clone();
-        let o = overlay.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
-            if t.parent().is_some() {
-                o.remove_overlay(&t);
-            }
-        });
-    }
+    glib::timeout_add_local_once(std::time::Duration::from_secs(2), dismiss);
 }
 
 fn dropped_file_text(file_list: &gtk::gdk::FileList) -> Option<CString> {
@@ -3049,6 +3044,43 @@ mod tests {
         // makes every context-menu item below it need two clicks.
         assert!(!popover.is_autohide());
         assert_eq!(button.popover().as_ref(), Some(&popover));
+    }
+
+    #[test]
+    #[ignore = "requires a graphical display"]
+    fn clipboard_toast_never_retains_its_terminal() {
+        gtk::init().expect("GTK display required");
+
+        // Dropped while the auto-dismiss timeout is still pending.
+        let overlay = gtk::Overlay::new();
+        show_clipboard_toast(&overlay);
+        let toast = overlay.last_child().expect("toast").downgrade();
+        let weak_overlay = overlay.downgrade();
+        drop(overlay);
+        assert!(weak_overlay.upgrade().is_none(), "timeout kept the overlay");
+        assert!(toast.upgrade().is_none(), "toast outlived its overlay");
+
+        // Dismissed with its close button.
+        let overlay = gtk::Overlay::new();
+        show_clipboard_toast(&overlay);
+        let toast = overlay.last_child().expect("toast");
+        toast
+            .last_child()
+            .and_downcast::<gtk::Button>()
+            .expect("close button")
+            .emit_clicked();
+        assert!(toast.parent().is_none(), "close button left the toast");
+        let weak_toast = toast.downgrade();
+        let weak_overlay = overlay.downgrade();
+        drop((toast, overlay));
+        assert!(
+            weak_toast.upgrade().is_none(),
+            "close handler kept the toast"
+        );
+        assert!(
+            weak_overlay.upgrade().is_none(),
+            "close handler kept the overlay"
+        );
     }
 
     #[test]
