@@ -9,7 +9,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use gtk::glib;
@@ -283,6 +283,10 @@ pub struct PaneCallbacks {
 struct TerminalTabState {
     cwd: Rc<RefCell<Option<String>>>,
     handle: terminal::TerminalHandle,
+    /// Pane that currently owns the terminal; the hover-focus and
+    /// clipboard closures baked into the terminal read it, so a move
+    /// re-points them.
+    owner: Rc<RefCell<Weak<PaneInternals>>>,
 }
 
 #[derive(Clone)]
@@ -1495,19 +1499,25 @@ fn add_terminal_tab_inner(
             .or_else(|| working_directory.map(|cwd| cwd.to_string())),
     ));
     let term_callbacks = make_terminal_callbacks(internals, &tab_id, &title_label, &term_cwd);
+    let owner = Rc::new(RefCell::new(Rc::downgrade(internals)));
     let hover_focus = {
-        let callbacks = internals.callbacks.clone();
-        let tab_state = internals.tab_state.clone();
+        let owner = owner.clone();
         Rc::new(move || {
-            let config = (callbacks.current_config)();
+            let Some(pane) = owner.borrow().upgrade() else {
+                return false;
+            };
+            let config = (pane.callbacks.current_config)();
             let hover_focus = config.borrow().focus.hover_terminal_focus;
-            hover_focus && !tab_rename_active(&tab_state)
+            hover_focus && !tab_rename_active(&pane.tab_state)
         })
     };
     let copy_selection_to_clipboard = {
-        let callbacks = internals.callbacks.clone();
+        let owner = owner.clone();
         Rc::new(move || {
-            let config = (callbacks.current_config)();
+            let Some(pane) = owner.borrow().upgrade() else {
+                return true;
+            };
+            let config = (pane.callbacks.current_config)();
             let copy_selection_to_clipboard = config.borrow().clipboard.copy_selection_to_clipboard;
             copy_selection_to_clipboard
         })
@@ -1605,6 +1615,7 @@ fn add_terminal_tab_inner(
                 state: TerminalTabState {
                     cwd: term_cwd.clone(),
                     handle: term.handle.clone(),
+                    owner,
                 },
             },
         });
@@ -3106,6 +3117,7 @@ fn rebuild_tab_strip(tab_strip: &gtk::Box, tab_state: &Rc<RefCell<TabState>>) {
 
 fn rebind_moved_tab_entry(entry: &mut TabEntry, target: &Rc<PaneInternals>) {
     if let TabKind::Terminal { state } = &entry.kind {
+        *state.owner.borrow_mut() = Rc::downgrade(target);
         state.handle.replace_callbacks(make_terminal_callbacks(
             target,
             &entry.id,
@@ -5091,6 +5103,143 @@ mod tests {
         assert_eq!(
             internals.content_stack.visible_child_name().as_deref(),
             Some(replacement_id.as_str())
+        );
+
+        window.close();
+    }
+
+    // A terminal moved to another pane used to keep reading the rename state
+    // of the pane that created it, so hovering it stole the focus from a
+    // rename in its new pane.
+    #[test]
+    #[ignore = "requires a graphical display and Ghostty resources"]
+    fn moved_terminal_hover_focus_follows_its_new_pane() {
+        use super::{
+            commit_active_tab_rename, create_pane, find_pane_internals, find_tab_rename_entry,
+            glib, move_tab_to_pane, show_rename_dialog, PaneCallbacks,
+        };
+        use crate::app_config::AppConfig;
+        use gtk::prelude::*;
+        use gtk4 as gtk;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        crate::prepare_ghostty_runtime();
+        gtk::init().expect("GTK display required");
+        crate::terminal::init_ghostty();
+        let context = glib::MainContext::default();
+        let shortcuts = Rc::new(default_shortcuts());
+        let mut config = AppConfig::default();
+        config.focus.hover_terminal_focus = true;
+        let config = Rc::new(RefCell::new(config));
+        let callbacks = || {
+            let shortcuts = shortcuts.clone();
+            let config = config.clone();
+            Rc::new(PaneCallbacks {
+                workspace_id: "test".to_string(),
+                autostart_command: Rc::default(),
+                suppress_next_autostart: Cell::new(false),
+                initial_command: RefCell::new(None),
+                on_split: Box::new(|_, _| {}),
+                on_close_pane: Box::new(|_| {}),
+                on_bell: Box::new(|_, _, _| {}),
+                on_desktop_notification: Box::new(|_, _, _, _, _| {}),
+                on_open_browser_here: Box::new(|_| {}),
+                on_open_url_in_browser: Box::new(|_, _| {}),
+                on_open_keybinds: Box::new(|_| {}),
+                current_shortcuts: Box::new(move || shortcuts.clone()),
+                on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
+                on_pwd_changed: Box::new(|_| {}),
+                on_empty: Box::new(|_, _| {}),
+                on_state_changed: Box::new(|| {}),
+                on_unread_changed: Box::new(|| {}),
+                is_pane_visible: Box::new(|_| true),
+                on_split_with_tab: Box::new(|_, _, _, _, _| {}),
+                current_config: Box::new(move || config.clone()),
+                workspace_for_pane: Box::new(|_| None),
+            })
+        };
+
+        let source = create_pane(callbacks(), shortcuts.clone(), None, None, true);
+        let target = create_pane(callbacks(), shortcuts.clone(), None, None, true);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        row.append(&source);
+        row.append(&target);
+        let window = gtk::Window::builder().child(&row).build();
+        window.present();
+        super::add_terminal_tab_to_pane(source.upcast_ref());
+        super::add_terminal_tab_to_pane(target.upcast_ref());
+
+        let source_state = find_pane_internals(source.upcast_ref()).unwrap();
+        let target_state = find_pane_internals(target.upcast_ref()).unwrap();
+        let (moved_id, moved_content) = {
+            let tabs = source_state.tab_state.borrow();
+            (tabs.tabs[0].id.clone(), tabs.tabs[0].content.clone())
+        };
+        let (renamed_id, renamed_label) = {
+            let tabs = target_state.tab_state.borrow();
+            (tabs.tabs[0].id.clone(), tabs.tabs[0].title_label.clone())
+        };
+        let mut widgets = vec![moved_content.clone()];
+        let gl_area = std::iter::from_fn(|| {
+            let widget = widgets.pop()?;
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                child = current.next_sibling();
+                widgets.push(current);
+            }
+            Some(widget)
+        })
+        .find_map(|widget| widget.downcast::<gtk::GLArea>().ok())
+        .expect("terminal GLArea");
+        let hover = || {
+            let controllers = gl_area.observe_controllers();
+            for motion in (0..controllers.n_items())
+                .filter_map(|index| controllers.item(index))
+                .filter_map(|item| item.downcast::<gtk::EventControllerMotion>().ok())
+            {
+                motion.emit_by_name::<()>("enter", &[&1.0f64, &1.0f64]);
+            }
+        };
+        while !moved_content.is_mapped() {
+            context.iteration(true);
+        }
+
+        assert!(move_tab_to_pane(
+            source.upcast_ref(),
+            &moved_id,
+            target.upcast_ref()
+        ));
+        while !gl_area.is_mapped()
+            || moved_content.parent() != Some(target_state.content_stack.clone().upcast())
+        {
+            context.iteration(true);
+        }
+
+        show_rename_dialog(
+            &target_state.tab_strip,
+            &renamed_label,
+            &target_state.tab_state,
+            &renamed_id,
+            &target_state.callbacks,
+        );
+        assert!(find_tab_rename_entry(&target_state.tab_strip).is_some());
+        hover();
+        assert_ne!(
+            GtkWindowExt::focus(&window),
+            Some(gl_area.clone().upcast()),
+            "hover took the focus from a rename in the terminal's new pane"
+        );
+
+        assert!(commit_active_tab_rename(&target_state.tab_state));
+        while find_tab_rename_entry(&target_state.tab_strip).is_some() {
+            context.iteration(true);
+        }
+        hover();
+        assert_eq!(
+            GtkWindowExt::focus(&window),
+            Some(gl_area.clone().upcast()),
+            "hover focus must work in the new pane once the rename ends"
         );
 
         window.close();

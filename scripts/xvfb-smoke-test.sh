@@ -391,6 +391,7 @@ for regression in \
   pane::tests::moved_tab_survives_either_pane_closing_before_the_next_frame \
   pane::tests::retired_pane_releases_its_tab_contents_after_a_frame \
   pane::tests::closing_the_active_tab_maps_only_its_replacement \
+  pane::tests::moved_terminal_hover_focus_follows_its_new_pane \
   split_tree::tests::split_ratio_callbacks_release_unmapped_paned \
   settings_editor::tests::interface_controls_restore_effective_values_after_save_failure \
   window::tests::hidden_workspace_path_does_not_reserve_sidebar_row_height \
