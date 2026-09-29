@@ -6472,7 +6472,6 @@ fn close_workspace_by_id_internal(
     let Some(split_container) = split_container else {
         return;
     };
-    split_container.retire_panes();
 
     let mut s = state.borrow_mut();
     let Some(idx) = s.workspaces.iter().position(|workspace| workspace.id == id) else {
@@ -6489,6 +6488,7 @@ fn close_workspace_by_id_internal(
     if s.workspaces.is_empty() {
         s.active_idx = 0;
         drop(s);
+        split_container.retire_panes();
         crate::terminal::remove_from_stack_after_repaint(&ws.root);
         apply_top_bar_mode(state);
         if persist {
@@ -6523,6 +6523,10 @@ fn close_workspace_by_id_internal(
     // and the crossing event it sends to the terminal under the pointer reads
     // the state, so it runs without the borrow.
     stack.set_visible_child_name(&stack_name);
+    // The switch moves the focus into the new workspace when the old one had
+    // it, so the old one is retired only now: retiring unsets a focus inside
+    // it (see `terminal::unset_focus_within`).
+    split_container.retire_panes();
     crate::terminal::remove_from_stack_after_repaint(&ws.root);
     sidebar_list.select_row(Some(&row));
     apply_top_bar_mode(state);
@@ -9029,3 +9033,7 @@ mod tab_move_tests;
 #[cfg(test)]
 #[path = "pane_create_tests.rs"]
 mod pane_create_tests;
+
+#[cfg(test)]
+#[path = "pane_close_tests.rs"]
+mod pane_close_tests;

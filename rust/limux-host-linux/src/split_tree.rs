@@ -78,6 +78,24 @@ impl SplitNode {
         }
     }
 
+    /// The pane nearest to `target` in the sibling that `remove` promotes.
+    fn successor_of(&self, target: &gtk::Widget) -> Option<gtk::Widget> {
+        let SplitNode::Split { left, right, .. } = self else {
+            return None;
+        };
+        let mut panes = Vec::new();
+        if matches!(left.as_ref(), SplitNode::Leaf { pane_widget } if pane_widget == target) {
+            right.collect_panes(&mut panes);
+            return panes.into_iter().next();
+        }
+        if matches!(right.as_ref(), SplitNode::Leaf { pane_widget } if pane_widget == target) {
+            left.collect_panes(&mut panes);
+            return panes.pop();
+        }
+        left.successor_of(target)
+            .or_else(|| right.successor_of(target))
+    }
+
     /// Find the leaf containing `target` and promote its sibling in place.
     pub(crate) fn remove(&mut self, target: &gtk::Widget) -> bool {
         match self {
@@ -149,7 +167,9 @@ pub(crate) struct SplitTreeContainer {
     rebuild_source: RefCell<Option<glib::SourceId>>,
     teardown_pending: Cell<bool>,
     after_rebuild: RefCell<Vec<Box<dyn FnOnce()>>>,
-    last_focused: RefCell<Option<gtk::Widget>>,
+    /// Weak: `remove` saves the focus before a pane closes, and that focus is
+    /// usually inside the closing pane.
+    last_focused: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
     zoomed_pane: RefCell<Option<gtk::Widget>>,
     state: State,
 }
@@ -241,7 +261,7 @@ impl SplitTreeContainer {
             return false;
         }
         self.zoomed_pane.borrow_mut().take();
-        *self.last_focused.borrow_mut() = Some(target.clone());
+        *self.last_focused.borrow_mut() = Some(target.downgrade());
         self.trigger_rebuild();
         true
     }
@@ -249,7 +269,7 @@ impl SplitTreeContainer {
     fn zoom_pane(self: &Rc<Self>, target: &gtk::Widget) {
         self.save_focus();
         *self.zoomed_pane.borrow_mut() = Some(target.clone());
-        *self.last_focused.borrow_mut() = Some(target.clone());
+        *self.last_focused.borrow_mut() = Some(target.downgrade());
         self.trigger_rebuild();
     }
 
@@ -278,7 +298,7 @@ impl SplitTreeContainer {
 
         self.save_focus();
         self.zoomed_pane.borrow_mut().take();
-        *self.last_focused.borrow_mut() = Some(new_pane.clone());
+        *self.last_focused.borrow_mut() = Some(new_pane.downgrade());
 
         let shared_ratio = Rc::new(RefCell::new(layout_state::clamp_split_ratio(ratio)));
         let new_node = if new_pane_first {
@@ -321,12 +341,23 @@ impl SplitTreeContainer {
         self.save_focus();
         self.zoomed_pane.borrow_mut().take();
 
-        let removed = {
+        let (removed, successor) = {
             let mut tree = self.tree.borrow_mut();
-            tree.remove(target)
+            let successor = tree.successor_of(target);
+            (tree.remove(target), successor)
         };
 
         if removed {
+            // The focus was in the closed pane: the pane that takes its place
+            // gets it after the rebuild.
+            let focus = self
+                .last_focused
+                .borrow()
+                .as_ref()
+                .and_then(|w| w.upgrade());
+            if focus.is_some_and(|focus| &focus == target || focus.is_ancestor(target)) {
+                *self.last_focused.borrow_mut() = successor.map(|pane| pane.downgrade());
+            }
             self.trigger_rebuild();
         }
         removed
@@ -430,8 +461,13 @@ impl SplitTreeContainer {
         // Newly created panes are tracked as pane containers rather than the
         // inner terminal/browser widget, so restore through the pane helper
         // when possible and fall back to plain widget focus otherwise.
-        if let Some(focused) = self.last_focused.borrow().as_ref() {
-            if !pane::focus_active_tab_in_pane(focused) {
+        let focused = self
+            .last_focused
+            .borrow()
+            .as_ref()
+            .and_then(|w| w.upgrade());
+        if let Some(focused) = focused {
+            if !pane::focus_active_tab_in_pane(&focused) {
                 focused.grab_focus();
             }
         }
@@ -439,12 +475,18 @@ impl SplitTreeContainer {
     }
 
     fn save_focus(&self) {
+        // A teardown under way unset the focus on purpose (see
+        // `terminal::unset_focus_within`): the focus saved before it still
+        // stands.
+        if self.teardown_pending.get() || self.rebuild_source.borrow().is_some() {
+            return;
+        }
         let focus = self
             .bin
             .root()
             .and_then(|r| r.downcast::<gtk::Window>().ok())
             .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w));
-        *self.last_focused.borrow_mut() = focus;
+        *self.last_focused.borrow_mut() = focus.map(|focus| focus.downgrade());
     }
 }
 

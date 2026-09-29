@@ -393,6 +393,7 @@ for regression in \
   terminal::tests::submenu_popovers_never_grab \
   terminal::tests::detach_after_repaint_waits_for_a_frame_without_the_widget \
   window::pane_create_tests::pane_create_replies_once_the_new_pane_can_be_targeted \
+  window::pane_close_tests::closed_tabs_panes_and_workspaces_free_their_widgets \
   window::ssh_launch_tests::ssh_launch_is_explicit_and_not_persisted \
   window::tab_move_tests::moving_a_first_tab_to_another_workspace_keeps_tab_ids_unique; do
   cargo test --locked $CARGO_FLAGS -p limux-host-linux "$regression" \
