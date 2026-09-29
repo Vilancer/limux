@@ -2428,6 +2428,27 @@ fn show_terminal_context_menu(
         return;
     }
 
+    let popover = build_terminal_context_menu(gl_area, overlay, surface, callbacks, x, y, mods);
+    if widget_has_native_surface(gl_area) {
+        popover.popup();
+    }
+    // The `closed` handler detaches the menu, but GTK emits `closed` only when
+    // it hides a menu it presented: emit it for one never shown, or one the
+    // compositor refused (a popup grab it rejects, or no seat at all).
+    if !popover.is_mapped() {
+        popover.emit_by_name::<()>("closed", &[]);
+    }
+}
+
+fn build_terminal_context_menu(
+    gl_area: &gtk::GLArea,
+    overlay: &gtk::Overlay,
+    surface: Option<ghostty_surface_t>,
+    callbacks: &Rc<RefCell<TerminalCallbacks>>,
+    x: f64,
+    y: f64,
+    mods: c_int,
+) -> gtk::Popover {
     let menu_box = build_popover_inner_box();
     let url = url_at_position(surface, x, y, mods);
 
@@ -2549,11 +2570,13 @@ fn show_terminal_context_menu(
     while let Some(widget) = child {
         if let Some(btn) = widget.downcast_ref::<gtk::Button>() {
             let label = btn.label().unwrap_or_default().to_string();
+            // Weak: GTK 4.22 can keep a closed menu alive, which must not keep
+            // the terminal alive with it.
             let pop = popover.downgrade();
             let cb = callbacks.clone();
-            let gl_area = gl_area.clone();
+            let gl_area = gl_area.downgrade();
             let url = url.clone();
-            let overlay = overlay.clone();
+            let overlay = overlay.downgrade();
 
             btn.connect_clicked(move |_| {
                 let Some(pop) = pop.upgrade() else {
@@ -2565,7 +2588,9 @@ fn show_terminal_context_menu(
                     "Copy URL" => {
                         if let Some(url) = url.as_deref() {
                             copy_text_to_clipboards(url);
-                            show_clipboard_toast(&overlay);
+                            if let Some(overlay) = overlay.upgrade() {
+                                show_clipboard_toast(&overlay);
+                            }
                         }
                     }
                     "Paste" => surface_action(surface, "paste_from_clipboard"),
@@ -2582,12 +2607,14 @@ fn show_terminal_context_menu(
                         (callbacks.on_split_down)();
                     }
                     "Keybinds" => {
-                        let anchor: gtk::Widget = gl_area.clone().upcast();
-                        let cb = cb.clone();
-                        glib::timeout_add_local_once(Duration::from_millis(80), move || {
-                            let callbacks = cb.borrow();
-                            (callbacks.on_open_keybinds)(&anchor);
-                        });
+                        if let Some(gl_area) = gl_area.upgrade() {
+                            let anchor: gtk::Widget = gl_area.upcast();
+                            let cb = cb.clone();
+                            glib::timeout_add_local_once(Duration::from_millis(80), move || {
+                                let callbacks = cb.borrow();
+                                (callbacks.on_open_keybinds)(&anchor);
+                            });
+                        }
                     }
                     "Clear" => surface_action(surface, "clear_screen"),
                     _ => {}
@@ -2624,12 +2651,14 @@ fn show_terminal_context_menu(
     {
         let pop = popover.downgrade();
         let ids_pop = ids_popover.downgrade();
-        let overlay = overlay.clone();
+        let overlay = overlay.downgrade();
         let workspace_id = identity.workspace_id.clone();
         copy_workspace_btn.connect_clicked(move |_| {
             if let Some(workspace_id) = workspace_id.as_deref() {
                 copy_text_to_clipboards(workspace_id);
-                show_clipboard_toast(&overlay);
+                if let Some(overlay) = overlay.upgrade() {
+                    show_clipboard_toast(&overlay);
+                }
             }
             if let Some(ids_pop) = ids_pop.upgrade() {
                 ids_pop.popdown();
@@ -2643,11 +2672,13 @@ fn show_terminal_context_menu(
     {
         let pop = popover.downgrade();
         let ids_pop = ids_popover.downgrade();
-        let overlay = overlay.clone();
+        let overlay = overlay.downgrade();
         let surface_id = identity.surface_id.clone();
         copy_surface_btn.connect_clicked(move |_| {
             copy_text_to_clipboards(&surface_id);
-            show_clipboard_toast(&overlay);
+            if let Some(overlay) = overlay.upgrade() {
+                show_clipboard_toast(&overlay);
+            }
             if let Some(ids_pop) = ids_pop.upgrade() {
                 ids_pop.popdown();
             }
@@ -2669,13 +2700,7 @@ fn show_terminal_context_menu(
         });
     }
 
-    if widget_has_native_surface(gl_area) {
-        popover.popup();
-    } else {
-        ids_menu_button.set_popover(None::<&gtk::Popover>);
-        open_in_menu_button.set_popover(None::<&gtk::Popover>);
-        popover.unparent();
-    }
+    popover
 }
 
 // ---------------------------------------------------------------------------
@@ -2900,61 +2925,45 @@ fn fallback_unshifted_codepoint(keyval: gtk::gdk::Key) -> u32 {
 }
 
 /// Styles for the clipboard toast, installed once with the app stylesheet.
-pub(crate) const CLIPBOARD_TOAST_CSS: &str = "box.limux-toast { \
-        background: rgba(45, 45, 45, 0.95); \
-        color: white; \
-        border-radius: 6px; \
-        padding: 6px 14px; \
-        font-size: 12px; \
-    } \
-    box.limux-toast label { color: white; } \
-    box.limux-toast button { \
-        color: rgba(255,255,255,0.5); \
-        border: none; \
-        background: none; \
-        min-height: 0; min-width: 0; \
-        padding: 0 2px; \
-    } \
-    box.limux-toast button:hover { color: white; }";
+pub(crate) const CLIPBOARD_TOAST_CSS: &str = r#"
+label.limux-toast {
+    background: rgba(45, 45, 45, 0.95);
+    color: white;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 12px;
+}
+"#;
 
 /// Show a brief "Copied to clipboard" toast at the bottom of the terminal.
 fn show_clipboard_toast(overlay: &gtk::Overlay) {
-    let toast = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    // One toast per terminal: a new copy, OSC 52 writes included, replaces the
+    // one shown, so it stays 2 s after the last copy instead of stacking.
+    let mut child = overlay.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if widget.has_css_class("limux-toast") {
+            overlay.remove_overlay(&widget);
+        }
+    }
+
+    let toast = gtk::Label::new(Some("Copied to clipboard"));
+    toast.add_css_class("limux-toast");
     toast.set_halign(gtk::Align::Center);
     toast.set_valign(gtk::Align::End);
     toast.set_margin_bottom(12);
-    toast.add_css_class("limux-toast");
-    let label = gtk::Label::new(Some("Copied to clipboard"));
-    let close_btn = gtk::Button::with_label("\u{00D7}"); // ×
-    toast.append(&label);
-    toast.append(&close_btn);
     toast.set_can_target(false);
-
     overlay.add_overlay(&toast);
 
-    // Both handlers hold weak refs: the close button is the toast's child, so
-    // a strong one would pin the toast and, through it, the terminal overlay.
-    let dismiss = {
-        let toast = toast.downgrade();
-        let overlay = overlay.downgrade();
-        move || {
-            if let (Some(toast), Some(overlay)) = (toast.upgrade(), overlay.upgrade()) {
-                if toast.parent().as_ref() == Some(overlay.upcast_ref()) {
-                    overlay.remove_overlay(&toast);
-                }
+    // Weak, so a toast whose terminal has closed is freed at once.
+    let toast = toast.downgrade();
+    glib::timeout_add_local_once(Duration::from_secs(2), move || {
+        if let Some(toast) = toast.upgrade() {
+            if let Some(overlay) = toast.parent().and_downcast::<gtk::Overlay>() {
+                overlay.remove_overlay(&toast);
             }
         }
-    };
-
-    // Close button dismisses immediately
-    close_btn.set_can_target(true);
-    close_btn.connect_clicked({
-        let dismiss = dismiss.clone();
-        move |_| dismiss()
     });
-
-    // Auto-dismiss after 2 seconds
-    glib::timeout_add_local_once(std::time::Duration::from_secs(2), dismiss);
 }
 
 fn dropped_file_text(file_list: &gtk::gdk::FileList) -> Option<CString> {
@@ -3050,6 +3059,7 @@ mod tests {
     #[ignore = "requires a graphical display"]
     fn clipboard_toast_never_retains_its_terminal() {
         gtk::init().expect("GTK display required");
+        let context = glib::MainContext::default();
 
         // Dropped while the auto-dismiss timeout is still pending.
         let overlay = gtk::Overlay::new();
@@ -3060,27 +3070,121 @@ mod tests {
         assert!(weak_overlay.upgrade().is_none(), "timeout kept the overlay");
         assert!(toast.upgrade().is_none(), "toast outlived its overlay");
 
-        // Dismissed with its close button.
+        // Dismissed by its timeout, and freed then.
         let overlay = gtk::Overlay::new();
         show_clipboard_toast(&overlay);
-        let toast = overlay.last_child().expect("toast");
-        toast
-            .last_child()
-            .and_downcast::<gtk::Button>()
-            .expect("close button")
-            .emit_clicked();
-        assert!(toast.parent().is_none(), "close button left the toast");
-        let weak_toast = toast.downgrade();
-        let weak_overlay = overlay.downgrade();
-        drop((toast, overlay));
+        let toast = overlay.last_child().expect("toast").downgrade();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while toast.upgrade().is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "toast never dismissed itself"
+            );
+            if !context.iteration(false) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
         assert!(
-            weak_toast.upgrade().is_none(),
-            "close handler kept the toast"
+            overlay.first_child().is_none(),
+            "dismissal left a widget behind"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a graphical display"]
+    fn repeated_copies_show_a_single_clipboard_toast() {
+        gtk::init().expect("GTK display required");
+        let context = glib::MainContext::default();
+        let run_until = |deadline: std::time::Instant| {
+            while std::time::Instant::now() < deadline {
+                if !context.iteration(false) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        };
+        let start = std::time::Instant::now();
+        let overlay = gtk::Overlay::new();
+        show_clipboard_toast(&overlay);
+        let first = overlay.last_child().expect("toast").downgrade();
+        run_until(start + Duration::from_secs(1));
+        for _ in 0..2 {
+            show_clipboard_toast(&overlay);
+        }
+        assert!(
+            first.upgrade().is_none(),
+            "a new copy did not restart the toast"
+        );
+        let last = overlay.last_child().expect("toast").downgrade();
+
+        // Past the first copy's 2 s, the last copy's toast is still up.
+        run_until(start + Duration::from_millis(2500));
+        assert!(
+            last.upgrade().is_some_and(|toast| toast.parent().is_some()),
+            "the first copy's timeout dismissed the last copy's toast"
+        );
+        let mut toasts = 0;
+        let mut child = overlay.first_child();
+        while let Some(widget) = child {
+            toasts += usize::from(widget.has_css_class("limux-toast"));
+            child = widget.next_sibling();
+        }
+        assert_eq!(toasts, 1, "each copy stacked another toast");
+    }
+
+    #[test]
+    #[ignore = "requires a graphical display"]
+    fn context_menu_never_retains_its_terminal() {
+        gtk::init().expect("GTK display required");
+        let gl_area = gtk::GLArea::new();
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&gl_area));
+        let callbacks = Rc::new(RefCell::new(TerminalCallbacks::disconnected()));
+        let menu = build_terminal_context_menu(&gl_area, &overlay, None, &callbacks, 10.0, 10.0, 0);
+        menu.emit_by_name::<()>("closed", &[]);
+        assert!(menu.parent().is_none(), "closing left the menu attached");
+
+        // The closed menu outlives its terminal, as GTK 4.22 keeps one closed
+        // with the focus inside it alive: its items must not keep the terminal.
+        let weak_gl_area = gl_area.downgrade();
+        let weak_overlay = overlay.downgrade();
+        drop((gl_area, overlay));
+        assert!(
+            weak_gl_area.upgrade().is_none(),
+            "the context menu kept the GL area"
         );
         assert!(
             weak_overlay.upgrade().is_none(),
-            "close handler kept the overlay"
+            "the context menu kept the overlay"
         );
+        drop(menu);
+    }
+
+    #[test]
+    #[ignore = "requires a graphical display"]
+    fn context_menu_the_compositor_refuses_is_detached() {
+        gtk::init().expect("GTK display required");
+        let gl_area = gtk::GLArea::new();
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&gl_area));
+        let window = gtk::Window::builder().child(&overlay).build();
+        window.present();
+        assert!(widget_has_native_surface(&gl_area));
+
+        // The headless smoke compositor has no seat, so it refuses the menu's
+        // popup grab, as a compositor does for a grab it rejects: GTK then
+        // never emits `closed`. A presented menu may stay; a refused one not.
+        let callbacks = Rc::new(RefCell::new(TerminalCallbacks::disconnected()));
+        show_terminal_context_menu(&gl_area, &overlay, None, &callbacks, 10.0, 10.0, 0);
+        if let Some(menu) = gl_area.first_child() {
+            assert!(
+                menu.is_mapped(),
+                "a menu the compositor refused stayed attached"
+            );
+            menu.downcast::<gtk::Popover>()
+                .expect("context menu")
+                .popdown();
+        }
+        window.close();
     }
 
     #[test]
