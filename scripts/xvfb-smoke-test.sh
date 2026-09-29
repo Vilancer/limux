@@ -380,6 +380,9 @@ cargo test --locked $CARGO_FLAGS -p limux-host-linux shutdown_uses_the_terminal_
   -- --ignored --test-threads=1 --nocapture >"$LOG_DIR/terminal-gl-context.txt" 2>&1 \
   || { cat "$LOG_DIR/terminal-gl-context.txt"; exit 1; }
 cat "$LOG_DIR/terminal-gl-context.txt"
+timeout -k 5s 30s cargo test --locked $CARGO_FLAGS -p limux-host-linux shutdown_with_pending_terminal_messages \
+  -- --ignored --test-threads=1 --nocapture >"$LOG_DIR/terminal-shutdown-backpressure.txt" 2>&1 \
+  || { cat "$LOG_DIR/terminal-shutdown-backpressure.txt"; exit 1; }
 if [ "$GRAPHICS" = hardware ] && ! grep -Fq 'terminal GL: ' "$LOG_DIR/terminal-gl-context.txt"; then
   echo "FAIL: hardware regression did not report its terminal GL context"
   exit 1

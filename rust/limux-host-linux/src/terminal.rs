@@ -3177,6 +3177,53 @@ mod tests {
 
     #[test]
     #[ignore = "requires a graphical display and Ghostty resources"]
+    fn shutdown_with_pending_terminal_messages() {
+        crate::prepare_ghostty_runtime();
+        gtk::init().expect("GTK display required");
+        init_ghostty();
+
+        let terminal = create_terminal(
+            Some("/tmp"),
+            TerminalOptions {
+                startup_command: Some(
+                    "/bin/sh -c 'printf \"FLOOD_READY\\n\"; i=0; while [ $i -lt 256 ]; do printf \"\\033]2;busy\\007\"; i=$((i+1)); done; sleep 30'"
+                        .to_string(),
+                ),
+                ..TerminalOptions::default()
+            },
+            TerminalCallbacks::disconnected(),
+        );
+        let window = gtk::Window::builder()
+            .default_width(640)
+            .default_height(480)
+            .child(&terminal.root)
+            .build();
+        window.present();
+        assert!(terminal.handle.surface_cell.borrow().is_some());
+
+        // Do not iterate the main context: the reader must encounter app
+        // mailbox backpressure before shutdown joins it on this thread.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !terminal
+            .handle
+            .read_viewport_text()
+            .is_some_and(|text| text.contains("FLOOD_READY"))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "terminal did not start"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        eprintln!("closing terminal with pending title updates");
+        terminal.handle.shutdown();
+        assert!(terminal.handle.surface_cell.borrow().is_none());
+        window.close();
+    }
+
+    #[test]
+    #[ignore = "requires a graphical display and Ghostty resources"]
     fn shutdown_uses_the_terminal_gl_context() {
         crate::prepare_ghostty_runtime();
         gtk::init().expect("GTK display required");
