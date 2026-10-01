@@ -636,7 +636,7 @@ fn install_split_ratio_tracking(paned: &gtk::Paned, ratio: &Rc<RefCell<f64>>) {
             return;
         }
         // A drag past a child's minimum would let GTK clip that pane.
-        let clamped = crate::window::clamp_paned_position(paned, paned.position());
+        let clamped = clamp_paned_position(paned, paned.position());
         if clamped != paned.position() {
             applying_for_notify.set(true);
             paned.set_position(clamped);
@@ -712,6 +712,56 @@ fn minimum_split_extent(orientation: gtk::Orientation) -> i32 {
     } else {
         pane::MIN_PANE_HEIGHT
     }
+}
+
+/// Clamps `position` so neither child of `paned` drops below its minimum
+/// extent (see `layout_state::clamp_split_position`).
+pub(crate) fn clamp_paned_position(paned: &gtk::Paned, position: i32) -> i32 {
+    let orientation = paned.orientation();
+    let child_min = |child: Option<gtk::Widget>| {
+        child.map_or(0, |child| subtree_min_extent(&child, orientation))
+    };
+    layout_state::clamp_split_position(
+        position,
+        child_min(paned.start_child()),
+        child_min(paned.end_child()),
+        paned.max_position(),
+    )
+}
+
+/// Minimum extent of a split subtree along `orientation`: leaves contribute
+/// the pane minimum, nested splits sum them (same orientation) or take the
+/// larger (cross orientation).
+fn subtree_min_extent(widget: &gtk::Widget, orientation: gtk::Orientation) -> i32 {
+    if !widget.is_visible() {
+        return 0;
+    }
+    let Some(paned) = widget.downcast_ref::<gtk::Paned>() else {
+        // The pane minimum, not the measured one: the tab strip does not
+        // scroll, so the measured width grows with every tab and would skew
+        // even splits (the reason the paned children shrink).
+        return minimum_split_extent(orientation);
+    };
+    let start = paned
+        .start_child()
+        .map_or(0, |child| subtree_min_extent(&child, orientation));
+    let end = paned
+        .end_child()
+        .map_or(0, |child| subtree_min_extent(&child, orientation));
+    if paned.orientation() != orientation {
+        return start.max(end);
+    }
+    let extent = if orientation == gtk::Orientation::Horizontal {
+        paned.width()
+    } else {
+        paned.height()
+    };
+    let handle = if extent > 0 {
+        (extent - paned.max_position()).max(0)
+    } else {
+        0
+    };
+    start + end + handle
 }
 
 fn split_extent_has_room(size: i32, orientation: gtk::Orientation) -> bool {
