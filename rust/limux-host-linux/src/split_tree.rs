@@ -748,20 +748,18 @@ fn subtree_min_extent(widget: &gtk::Widget, orientation: gtk::Orientation) -> i3
     let end = paned
         .end_child()
         .map_or(0, |child| subtree_min_extent(&child, orientation));
-    if paned.orientation() != orientation {
-        return start.max(end);
-    }
+    let along = paned.orientation() == orientation;
     let extent = if orientation == gtk::Orientation::Horizontal {
         paned.width()
     } else {
         paned.height()
     };
-    let handle = if extent > 0 {
+    let handle = if along && extent > 0 {
         (extent - paned.max_position()).max(0)
     } else {
         0
     };
-    start + end + handle
+    layout_state::nested_split_min_extent(start, end, along, handle)
 }
 
 fn split_extent_has_room(size: i32, orientation: gtk::Orientation) -> bool {

@@ -402,6 +402,16 @@ pub fn clamp_split_position(position: i32, start_min: i32, end_min: i32, max_pos
     position.clamp(start_min, max_position - end_min)
 }
 
+/// Minimum extent of a nested split from its children's minimums: stacked
+/// along the split's own orientation (plus the handle), side by side across.
+pub fn nested_split_min_extent(start_min: i32, end_min: i32, along: bool, handle: i32) -> i32 {
+    if along {
+        start_min + end_min + handle
+    } else {
+        start_min.max(end_min)
+    }
+}
+
 pub fn normalize_session(mut state: AppSessionState) -> AppSessionState {
     state.version = SESSION_VERSION;
     state.sidebar.width = state.sidebar.width.max(DEFAULT_SIDEBAR_WIDTH);
@@ -1787,6 +1797,12 @@ mod tests {
         assert_eq!(clamp_split_position(434, 160, 160, 868), 434);
         // Too small for both minimums: leave the position alone.
         assert_eq!(clamp_split_position(94, 160, 160, 300), 94);
+    }
+
+    #[test]
+    fn nested_split_min_extent_sums_along_and_maxes_across() {
+        assert_eq!(nested_split_min_extent(160, 320, true, 1), 481);
+        assert_eq!(nested_split_min_extent(160, 320, false, 1), 320);
     }
 
     #[test]
