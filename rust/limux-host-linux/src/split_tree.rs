@@ -635,6 +635,13 @@ fn install_split_ratio_tracking(paned: &gtk::Paned, ratio: &Rc<RefCell<f64>>) {
             // here would suppress the tick's re-apply and drift the split.
             return;
         }
+        // A drag past a child's minimum would let GTK clip that pane.
+        let clamped = crate::window::clamp_paned_position(paned, paned.position());
+        if clamped != paned.position() {
+            applying_for_notify.set(true);
+            paned.set_position(clamped);
+            applying_for_notify.set(false);
+        }
         let new_ratio = layout_state::snapshot_split_ratio(
             paned.position(),
             size,

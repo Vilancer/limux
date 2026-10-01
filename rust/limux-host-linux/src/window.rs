@@ -1311,10 +1311,68 @@ pub(crate) fn apply_ratio_value(
         return false;
     }
     applying.set(true);
-    paned.set_position(layout_state::split_position_from_ratio(ratio, size));
+    paned.set_position(clamp_paned_position(
+        paned,
+        layout_state::split_position_from_ratio(ratio, size),
+    ));
     update_split_ratio_state(paned, ratio);
     applying.set(false);
     true
+}
+
+/// Clamps `position` so neither child of `paned` drops below its minimum
+/// extent (see `layout_state::clamp_split_position`).
+pub(crate) fn clamp_paned_position(paned: &gtk::Paned, position: i32) -> i32 {
+    let orientation = paned.orientation();
+    let child_min =
+        |child: Option<gtk::Widget>| child.map_or(0, |child| min_split_extent(&child, orientation));
+    layout_state::clamp_split_position(
+        position,
+        child_min(paned.start_child()),
+        child_min(paned.end_child()),
+        paned.max_position(),
+    )
+}
+
+/// Minimum extent of a split subtree along `orientation`: leaves contribute
+/// their size request, nested splits sum them (same orientation) or take the
+/// larger (cross orientation).
+fn min_split_extent(widget: &gtk::Widget, orientation: gtk::Orientation) -> i32 {
+    if !widget.is_visible() {
+        return 0;
+    }
+    let Some(paned) = widget.downcast_ref::<gtk::Paned>() else {
+        // The pane's size request, not its measured minimum: the tab strip
+        // does not scroll, so the measured width grows with every tab and
+        // would skew even splits (the reason the paned children shrink).
+        let (width, height) = widget.size_request();
+        let min = if orientation == gtk::Orientation::Horizontal {
+            width
+        } else {
+            height
+        };
+        return min.max(0);
+    };
+    let start = paned
+        .start_child()
+        .map_or(0, |child| min_split_extent(&child, orientation));
+    let end = paned
+        .end_child()
+        .map_or(0, |child| min_split_extent(&child, orientation));
+    if paned.orientation() != orientation {
+        return start.max(end);
+    }
+    let extent = if orientation == gtk::Orientation::Horizontal {
+        paned.width()
+    } else {
+        paned.height()
+    };
+    let handle = if extent > 0 {
+        (extent - paned.max_position()).max(0)
+    } else {
+        0
+    };
+    start + end + handle
 }
 
 pub(crate) fn apply_split_ratio_after_layout(
