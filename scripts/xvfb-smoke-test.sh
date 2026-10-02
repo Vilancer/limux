@@ -12,6 +12,9 @@
 #     LIMUX_EXPECT_GL_RENDERER='RTX 5070 Ti' ./scripts/xvfb-smoke-test.sh
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+"$ROOT_DIR/scripts/check-ghostty.sh"
+
 PROFILE="${LIMUX_SMOKE_PROFILE:-release}"
 GRAPHICS="${LIMUX_SMOKE_GRAPHICS:-software}"
 CYCLES="${LIMUX_SMOKE_CYCLES:-10}"
@@ -94,7 +97,6 @@ SMOKE_DBUS
   fi
   exit "$result"
 fi
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 DEMO_DIR="${LIMUX_SMOKE_RUN_DIR:?private smoke directory missing}"
