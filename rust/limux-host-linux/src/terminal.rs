@@ -1430,6 +1430,7 @@ pub(crate) fn detach_after_repaint(widget: &gtk::Widget, detach: impl FnOnce() +
         detach();
         return;
     };
+    unset_focus_within(widget);
     widget.set_visible(false);
 
     let detach = Rc::new(RefCell::new(Some(detach)));
@@ -1479,6 +1480,32 @@ pub(crate) fn detach_after_repaint(widget: &gtk::Widget, detach: impl FnOnce() +
             }
         });
     *timeout.borrow_mut() = Some(source);
+}
+
+/// Unset the window's focus when it is inside `widget`, before `widget` is
+/// hidden or unparented.
+///
+/// Hiding or unparenting the focus, or an ancestor of it, makes GTK keep that
+/// widget to move the focus from at the next frame. GTK 4.22 overwrites the
+/// ref when another such call lands first, so the widget and its whole tree
+/// leak (fixed on GTK main by a6e1c8a5). Teardowns chain them: hiding a
+/// stack's visible child makes the stack drop it too, closing a pane hides
+/// the old split tree and then the pane, a popover hides and then unparents.
+/// Where the focus should go next is up to the caller (the next tab, the pane
+/// or workspace that takes the place).
+pub(crate) fn unset_focus_within(widget: &gtk::Widget) {
+    if focus_is_within(widget) {
+        if let Some(root) = widget.root() {
+            root.set_focus(None::<&gtk::Widget>);
+        }
+    }
+}
+
+pub(crate) fn focus_is_within(widget: &gtk::Widget) -> bool {
+    widget
+        .root()
+        .and_then(|root| root.focus())
+        .is_some_and(|focus| &focus == widget || focus.is_ancestor(widget))
 }
 
 /// Remove `widget` from its `gtk::Stack` once its window has painted a frame
@@ -2632,13 +2659,10 @@ fn build_terminal_context_menu(
         (open_browser_tab_btn, LinkOpenDestination::BrowserTab),
     ] {
         let pop = popover.downgrade();
-        let open_in_pop = open_in_popover.downgrade();
         let callbacks = callbacks.clone();
         let url = url.clone();
         button.connect_clicked(move |_| {
-            if let Some(open_in_pop) = open_in_pop.upgrade() {
-                open_in_pop.popdown();
-            }
+            // The menu's closed handler closes the submenu too.
             if let Some(pop) = pop.upgrade() {
                 pop.popdown();
             }
@@ -2650,7 +2674,6 @@ fn build_terminal_context_menu(
 
     {
         let pop = popover.downgrade();
-        let ids_pop = ids_popover.downgrade();
         let overlay = overlay.downgrade();
         let workspace_id = identity.workspace_id.clone();
         copy_workspace_btn.connect_clicked(move |_| {
@@ -2660,9 +2683,7 @@ fn build_terminal_context_menu(
                     show_clipboard_toast(&overlay);
                 }
             }
-            if let Some(ids_pop) = ids_pop.upgrade() {
-                ids_pop.popdown();
-            }
+            // The menu's closed handler closes the submenu too.
             if let Some(pop) = pop.upgrade() {
                 pop.popdown();
             }
@@ -2671,7 +2692,6 @@ fn build_terminal_context_menu(
 
     {
         let pop = popover.downgrade();
-        let ids_pop = ids_popover.downgrade();
         let overlay = overlay.downgrade();
         let surface_id = identity.surface_id.clone();
         copy_surface_btn.connect_clicked(move |_| {
@@ -2679,9 +2699,7 @@ fn build_terminal_context_menu(
             if let Some(overlay) = overlay.upgrade() {
                 show_clipboard_toast(&overlay);
             }
-            if let Some(ids_pop) = ids_pop.upgrade() {
-                ids_pop.popdown();
-            }
+            // The menu's closed handler closes the submenu too.
             if let Some(pop) = pop.upgrade() {
                 pop.popdown();
             }
@@ -2691,7 +2709,15 @@ fn build_terminal_context_menu(
     {
         let ids_menu_button = ids_menu_button.clone();
         let open_in_menu_button = open_in_menu_button.clone();
+        let gl = gl_area.downgrade();
         popover.connect_closed(move |p| {
+            // Give the focus back to the terminal before the submenus and the
+            // menu are unparented, or GTK 4.22 leaks them (see
+            // `unset_focus_within`). A visible focus also drops the move the
+            // closing hide queued.
+            if focus_is_within(p.upcast_ref()) && !gl.upgrade().is_some_and(|gl| gl.grab_focus()) {
+                unset_focus_within(p.upcast_ref());
+            }
             ids_menu_button.popdown();
             ids_menu_button.set_popover(None::<&gtk::Popover>);
             open_in_menu_button.popdown();
