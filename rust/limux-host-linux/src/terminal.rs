@@ -258,6 +258,24 @@ pub struct TerminalHealth {
 }
 
 impl TerminalHandle {
+    #[cfg(test)]
+    pub(crate) fn build_context_menu_for_test(&self) -> gtk::Popover {
+        let overlay = self
+            .gl_area
+            .ancestor(gtk::Overlay::static_type())
+            .and_downcast::<gtk::Overlay>()
+            .expect("terminal overlay");
+        build_terminal_context_menu(
+            &self.gl_area,
+            &overlay,
+            *self.surface_cell.borrow(),
+            &self.callbacks,
+            10.0,
+            10.0,
+            0,
+        )
+    }
+
     pub fn replace_callbacks(&self, callbacks: TerminalCallbacks) {
         if !self.shutting_down.get() {
             *self.callbacks.borrow_mut() = callbacks;

@@ -88,13 +88,17 @@ fn open_context_menu(widget: &gtk::Widget) -> gtk::Popover {
         .expect("a context menu")
 }
 
-/// Focuses the menu item labelled `label`, as pressing it does.
-fn focus_menu_item(menu: &gtk::Popover, label: &str) -> gtk::Button {
-    let item = widget_tree(menu.upcast_ref())
+fn menu_item(menu: &gtk::Popover, label: &str) -> gtk::Button {
+    widget_tree(menu.upcast_ref())
         .into_iter()
         .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
         .find(|button| button.label().is_some_and(|text| text == label))
-        .unwrap_or_else(|| panic!("a {label:?} menu item"));
+        .unwrap_or_else(|| panic!("a {label:?} menu item"))
+}
+
+/// Focuses the menu item labelled `label`, as pressing it does.
+fn focus_menu_item(menu: &gtk::Popover, label: &str) -> gtk::Button {
+    let item = menu_item(menu, label);
     assert!(item.grab_focus());
     item
 }
@@ -246,10 +250,24 @@ fn closed_tabs_panes_and_workspaces_free_their_widgets() {
         .into_iter()
         .find(|w| w.is::<gtk::GLArea>() && w.is_mapped())
         .expect("the active terminal");
-    let terminal_menu = open_context_menu(&terminal);
+    // A synthetic right-click has no seat/grab under headless Weston, so the
+    // production entry point correctly detaches its refused popup immediately.
+    // Build the same menu with the real terminal callbacks and retain it here
+    // to exercise focus restoration and lifetime cleanup on close. Refused
+    // popup detachment has its own terminal regression.
+    let terminal_menu = pane::terminal_handle_for_surface(&closed, None)
+        .expect("the active terminal handle")
+        .1
+        .build_context_menu_for_test();
+    terminal_menu.popup();
     focus_menu_item(&terminal_menu, "Paste");
-    terminal_menu.popdown();
+    menu_item(&terminal_menu, "Copy Surface ID").emit_clicked();
     assert!(terminal_menu.parent().is_none(), "the terminal menu closed");
+    let toast = widget_tree(&closed)
+        .into_iter()
+        .find(|widget| widget.has_css_class("limux-toast"))
+        .expect("copying the surface ID showed a toast")
+        .downgrade();
     assert!(
         focus_within(&state, &terminal),
         "the terminal menu gives the focus back to its terminal as it closes"
@@ -273,6 +291,7 @@ fn closed_tabs_panes_and_workspaces_free_their_widgets() {
     );
 
     let mut refs = weak_refs(&widget_tree(&closed));
+    refs.push(toast);
     refs.push(terminal_menu.upcast::<gtk::Widget>().downgrade());
     refs.push(tab_menu.upcast::<gtk::Widget>().downgrade());
     refs.push(pin_menu.upcast::<gtk::Widget>().downgrade());
