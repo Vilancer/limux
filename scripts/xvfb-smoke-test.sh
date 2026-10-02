@@ -395,6 +395,10 @@ for regression in \
   settings_editor::tests::interface_controls_restore_effective_values_after_save_failure \
   window::tests::hidden_workspace_path_does_not_reserve_sidebar_row_height \
   terminal::tests::submenu_popovers_never_grab \
+  terminal::tests::clipboard_toast_never_retains_its_terminal \
+  terminal::tests::repeated_copies_show_a_single_clipboard_toast \
+  terminal::tests::context_menu_never_retains_its_terminal \
+  terminal::tests::context_menu_the_compositor_refuses_is_detached \
   terminal::tests::detach_after_repaint_waits_for_a_frame_without_the_widget \
   window::pane_create_tests::pane_create_replies_once_the_new_pane_can_be_targeted \
   window::pane_close_tests::closed_tabs_panes_and_workspaces_free_their_widgets \
