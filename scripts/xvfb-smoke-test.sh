@@ -12,6 +12,9 @@
 #     LIMUX_EXPECT_GL_RENDERER='RTX 5070 Ti' ./scripts/xvfb-smoke-test.sh
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+"$ROOT_DIR/scripts/check-ghostty.sh"
+
 PROFILE="${LIMUX_SMOKE_PROFILE:-release}"
 GRAPHICS="${LIMUX_SMOKE_GRAPHICS:-software}"
 CYCLES="${LIMUX_SMOKE_CYCLES:-10}"
@@ -94,7 +97,6 @@ SMOKE_DBUS
   fi
   exit "$result"
 fi
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 DEMO_DIR="${LIMUX_SMOKE_RUN_DIR:?private smoke directory missing}"
@@ -391,15 +393,21 @@ for regression in \
   pane::tests::moved_tab_survives_either_pane_closing_before_the_next_frame \
   pane::tests::retired_pane_releases_its_tab_contents_after_a_frame \
   pane::tests::closing_the_active_tab_maps_only_its_replacement \
+  pane::tests::moved_terminal_hover_focus_reads_its_new_pane_and_spares_renames \
   split_tree::tests::split_ratio_callbacks_release_unmapped_paned \
   settings_editor::tests::interface_controls_restore_effective_values_after_save_failure \
   window::tests::hidden_workspace_path_does_not_reserve_sidebar_row_height \
   terminal::tests::submenu_popovers_never_grab \
+  terminal::tests::clipboard_toast_never_retains_its_terminal \
+  terminal::tests::repeated_copies_show_a_single_clipboard_toast \
+  terminal::tests::context_menu_never_retains_its_terminal \
+  terminal::tests::context_menu_the_compositor_refuses_is_detached \
   terminal::tests::detach_after_repaint_waits_for_a_frame_without_the_widget \
   window::pane_create_tests::pane_create_replies_once_the_new_pane_can_be_targeted \
+  window::pane_close_tests::closed_tabs_panes_and_workspaces_free_their_widgets \
   window::ssh_launch_tests::ssh_launch_is_explicit_and_not_persisted \
   window::tab_move_tests::moving_a_first_tab_to_another_workspace_keeps_tab_ids_unique; do
-  cargo test --locked $CARGO_FLAGS -p limux-host-linux "$regression" \
+  timeout -k 5s 30s cargo test --locked $CARGO_FLAGS -p limux-host-linux "$regression" \
     -- --exact --ignored --test-threads=1 --nocapture
 done
 start_host host
