@@ -749,13 +749,13 @@ fn subtree_min_extent(widget: &gtk::Widget, orientation: gtk::Orientation) -> i3
         .end_child()
         .map_or(0, |child| subtree_min_extent(&child, orientation));
     let along = paned.orientation() == orientation;
-    let extent = if orientation == gtk::Orientation::Horizontal {
-        paned.width()
-    } else {
-        paned.height()
-    };
-    let handle = if along && extent > 0 {
-        (extent - paned.max_position()).max(0)
+    let handle = if along {
+        // Both children of Limux splits are shrinkable, so GTK's minimum
+        // extent along the Paned's axis is the separator size. Measure it
+        // directly: extent - max_position undercounts when the current
+        // allocation is smaller than the handle (GTK clamps that allocation
+        // to one pixel).
+        paned.measure(orientation, -1).0
     } else {
         0
     };
@@ -866,6 +866,136 @@ mod tests {
                 "callbacks retained the split widget"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires GTK; exercised by xvfb-smoke-test.sh"]
+    fn restoring_split_respects_nested_pane_minimums() {
+        fn wait_for(condition: impl Fn() -> bool, failure: &str) {
+            let context = glib::MainContext::default();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !condition() {
+                assert!(std::time::Instant::now() < deadline, "{failure}");
+                while context.pending() {
+                    context.iteration(false);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+
+        gtk::init().expect("initialize GTK");
+
+        let make_pane = || {
+            let pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            pane.set_size_request(-1, pane::MIN_PANE_HEIGHT);
+            pane
+        };
+        let nested_start = make_pane();
+        let nested_end = make_pane();
+        let nested = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .shrink_start_child(true)
+            .shrink_end_child(true)
+            .build();
+        nested.set_start_child(Some(&nested_start));
+        nested.set_end_child(Some(&nested_end));
+
+        let outer_end = make_pane();
+        let restored = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .shrink_start_child(true)
+            .shrink_end_child(true)
+            .build();
+        restored.set_start_child(Some(&nested));
+        restored.set_end_child(Some(&outer_end));
+        // Begin with the nested Paned below its handle size, as a tiny saved
+        // parent ratio can leave it before the restored ratios are applied.
+        restored.set_position(1);
+
+        let window = gtk::Window::new();
+        window.set_default_size(800, 700);
+        window.set_child(Some(&restored));
+        window.present();
+
+        wait_for(
+            || {
+                restored.is_mapped()
+                    && restored.height() > 0
+                    && nested.is_mapped()
+                    && nested.height() > 0
+            },
+            "split fixture did not receive a GTK allocation",
+        );
+
+        let handle_size = nested.measure(gtk::Orientation::Vertical, -1).0;
+        assert!(
+            handle_size > 0,
+            "GTK separator should have a measurable size"
+        );
+        assert!(
+            nested.height() <= handle_size,
+            "fixture should start with a nested Paned shorter than its handle"
+        );
+        let nested_minimum = pane::MIN_PANE_HEIGHT * 2 + handle_size;
+        let applying = Rc::new(Cell::new(false));
+        assert!(crate::window::apply_ratio_value(
+            &restored,
+            gtk::Orientation::Vertical,
+            0.1085,
+            &applying,
+        ));
+        assert!(
+            restored.position() >= nested_minimum,
+            "restoring a low ratio allocated {} px to a nested split with a {nested_minimum} px minimum",
+            restored.position()
+        );
+        assert!(
+            restored.max_position() - restored.position() >= pane::MIN_PANE_HEIGHT,
+            "restoring a low ratio left the outer end pane below its minimum"
+        );
+
+        wait_for(
+            || nested.height() == restored.position(),
+            "restored split position was not allocated to its nested child",
+        );
+
+        assert!(crate::window::apply_ratio_value(
+            &nested,
+            gtk::Orientation::Vertical,
+            0.1085,
+            &applying,
+        ));
+        assert!(
+            nested.position() >= pane::MIN_PANE_HEIGHT,
+            "restoring a low ratio left the nested start pane at {} px",
+            nested.position()
+        );
+        assert!(
+            nested.max_position() - nested.position() >= pane::MIN_PANE_HEIGHT,
+            "restoring a low ratio left the nested end pane below its minimum"
+        );
+
+        wait_for(
+            || {
+                nested_start.height() == nested.position()
+                    && nested_start.allocation().y() == 0
+                    && nested_end.height() >= pane::MIN_PANE_HEIGHT
+                    && nested_end.allocation().y() + nested_end.height() <= nested.height()
+                    && outer_end.height() >= pane::MIN_PANE_HEIGHT
+                    && outer_end.allocation().y() + outer_end.height() <= restored.height()
+            },
+            "restored split children did not fit their allocated bounds",
+        );
+        assert_eq!(
+            nested_start.allocation().y(),
+            0,
+            "restoring the inner split shifted its start pane out of view"
+        );
+        assert!(nested_start.height() >= pane::MIN_PANE_HEIGHT);
+        assert!(nested_end.height() >= pane::MIN_PANE_HEIGHT);
+        assert!(outer_end.height() >= pane::MIN_PANE_HEIGHT);
+
+        window.close();
     }
 
     #[test]
