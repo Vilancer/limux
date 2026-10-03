@@ -119,6 +119,7 @@ fn darken((r, g, b): (u8, u8, u8), percent: u16) -> (u8, u8, u8) {
 /// How far an unselected row's colour is dimmed, at rest and under the pointer.
 const DIM_PERCENT: u16 = 45;
 const DIM_HOVER_PERCENT: u16 = 28;
+const SECONDARY_TEXT_ALPHA: f64 = 1.0;
 
 /// Mix a colour toward white by `percent`, for the selected row's hover state.
 fn lighten((r, g, b): (u8, u8, u8), percent: u16) -> (u8, u8, u8) {
@@ -139,11 +140,6 @@ const SHARED_CSS: &str = r#"
 }
 .limux-sidebar-list row:selected .limux-ws-colored .limux-ws-name {
     color: white;
-}
-.limux-sidebar-list row .limux-ws-colored .limux-ws-path,
-.limux-sidebar-list row:selected .limux-ws-colored .limux-ws-path,
-.limux-sidebar-list row .limux-ws-colored .limux-notify-msg {
-    color: alpha(white, 0.75);
 }
 .limux-sidebar-list row .limux-ws-colored .limux-notify-msg-unread,
 .limux-sidebar-list row .limux-ws-colored .limux-notify-dot {
@@ -197,6 +193,13 @@ button.limux-ws-color-swatch-btn {
 /// CSS for coloured rows and the menu swatches, generated from the palette.
 pub fn workspace_color_css() -> String {
     let mut css = String::from(SHARED_CSS);
+    css.push_str(&format!(
+        ".limux-sidebar-list row .limux-ws-colored .limux-ws-path,\n\
+         .limux-sidebar-list row:selected .limux-ws-colored .limux-ws-path,\n\
+         .limux-sidebar-list row .limux-ws-colored .limux-notify-msg {{\n\
+             color: alpha(white, {SECONDARY_TEXT_ALPHA});\n\
+         }}\n"
+    ));
     for color in WorkspaceColor::ALL {
         let class = color.css_class();
         let base = hex(color.rgb());
@@ -273,6 +276,37 @@ mod tests {
                     "{} ({}) has contrast {contrast:.2} against white",
                     color.as_str(),
                     hex(rgb),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn secondary_text_is_readable_in_every_row_state() {
+        for color in WorkspaceColor::ALL {
+            for background in [
+                darken(color.rgb(), DIM_PERCENT),
+                darken(color.rgb(), DIM_HOVER_PERCENT),
+                color.rgb(),
+                lighten(color.rgb(), 12),
+            ] {
+                let composite = |channel: u8| {
+                    (255.0 * SECONDARY_TEXT_ALPHA
+                        + f64::from(channel) * (1.0 - SECONDARY_TEXT_ALPHA))
+                        .round() as u8
+                };
+                let foreground = (
+                    composite(background.0),
+                    composite(background.1),
+                    composite(background.2),
+                );
+                let contrast = (relative_luminance(foreground) + 0.05)
+                    / (relative_luminance(background) + 0.05);
+                assert!(
+                    contrast >= 4.5,
+                    "{} on {} has secondary-text contrast {contrast:.2}",
+                    color.as_str(),
+                    hex(background),
                 );
             }
         }
