@@ -77,7 +77,8 @@ When fixing user-visible CLI behavior, verify the production GTK bridge path,
 not only the standalone dispatcher. The live bridge supports system
 capabilities/identify, window activation, workspace and workspace-group
 management, pane/surface focus and lifecycle, terminal send/key/read/health,
-tab actions, GUI lifecycle hooks (`gui_hook.*`), notifications, terminal and
+tab actions, GUI lifecycle hooks (`gui_hook.*`), notifications, live agent
+state from hooks (`agent.activity`), terminal and
 browser pane creation, browser navigation/history, and tmux-compatible
 workspace and pane commands. Canonical RPC method specs (`CORE_COMMAND_NAMES`,
 `GTK_BRIDGE_COMMAND_NAMES`, socket `wire_aliases`, and `cli_subcommands`) live in

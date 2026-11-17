@@ -114,7 +114,8 @@ pub fn ui_scale_css(config: &AppConfig) -> String {
         .collect();
     let c = config.appearance.unread_color.css_color();
     rules.push(format!(
-        ".limux-indicator-unread-dot, .limux-notify-dot, .limux-tab-unread-dot {{ color: {c}; }}\n\
+        ".limux-indicator-unread-dot, .limux-notify-dot, .limux-tab-unread-dot, \
+         .limux-session-waiting, .limux-session-unread {{ color: {c}; }}\n\
          .limux-notify-msg-unread {{ color: alpha({c}, 0.9); }}\n\
          .limux-sidebar-row-unread {{ background-color: alpha({c}, 0.14); border-left: 3px solid {c}; }}\n\
          .limux-sidebar-list row:selected .limux-sidebar-row-box.limux-sidebar-row-unread {{ background: alpha({c}, 0.18); border-left: 3px solid {c}; }}"

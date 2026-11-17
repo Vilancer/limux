@@ -1120,8 +1120,8 @@ async fn run_agent_hook(
             }
         }
         "SessionStart" | "session-start" | "SessionEnd" | "session-end" | "UserPromptSubmit"
-        | "prompt-submit" | "PreToolUse" | "PostToolUse" | "SubagentStop" | "subagent-stop"
-        | "Cleanup" | "cleanup" | "restore-exit" => None,
+        | "prompt-submit" | "PreToolUse" | "PostToolUse" | "post-tool-use" | "SubagentStop"
+        | "subagent-stop" | "Cleanup" | "cleanup" | "restore-exit" => None,
         other => Some((
             format!("{agent_label}: {other}"),
             hook_str(&payload, &["message", "summary"])
@@ -1162,7 +1162,105 @@ async fn run_agent_hook(
         }
     }
 
+    if let Some(state) = agent_activity_state(agent, &event, &payload) {
+        report_agent_activity(client, agent, args, &payload, state).await;
+    }
+
     Ok(agent_hook_output(agent, &event, &payload))
+}
+
+/// The live state a hook event reports, as the `agent.activity` wire name
+/// ("ended" when the session ends). `None` leaves the terminal's state as it
+/// is. Only Claude Code is mapped so far; other agents keep their
+/// notifications and report no live state.
+fn agent_activity_state(
+    agent: agent_hooks::AgentKind,
+    event: &str,
+    payload: &Value,
+) -> Option<&'static str> {
+    if agent != agent_hooks::AgentKind::Claude {
+        return None;
+    }
+    match event {
+        "SessionStart" | "session-start" | "Stop" | "stop" => Some("idle"),
+        "UserPromptSubmit" | "prompt-submit" | "PreToolUse" | "PostToolUse" | "post-tool-use" => {
+            Some("working")
+        }
+        "SessionEnd" | "session-end" => Some("ended"),
+        "Notification" | "notification" => claude_notification_state(payload),
+        _ => None,
+    }
+}
+
+/// Claude Code sends one Notification hook for several reasons. Newer
+/// versions name it in `notification_type`; older ones only in the message.
+fn claude_notification_state(payload: &Value) -> Option<&'static str> {
+    match hook_str(payload, &["notification_type", "notificationType"]) {
+        Some("permission_prompt") => return Some("needs_approval"),
+        Some("elicitation_dialog") => return Some("needs_input"),
+        Some("idle_prompt") => return Some("idle"),
+        Some(_) => return None,
+        None => {}
+    }
+    let message = hook_str(payload, &["message"])?.to_ascii_lowercase();
+    if message.contains("permission") {
+        Some("needs_approval")
+    } else if message.contains("waiting for your input") {
+        Some("idle")
+    } else {
+        None
+    }
+}
+
+/// Tell the app what the agent in this terminal is doing. Best effort: a
+/// hook outside Limux (no terminal id) or an older app that lacks the method
+/// reports nothing, and the agent is never held up or shown an error.
+async fn report_agent_activity(
+    client: &mut Client,
+    agent: agent_hooks::AgentKind,
+    args: &[String],
+    payload: &Value,
+    state: &str,
+) {
+    // An OSC-only hook has no socket to report to.
+    if terminal_notifications::forced() {
+        return;
+    }
+    let (workspace, surface) = notification_scope(args, env_opt);
+    let Some(surface) = surface else {
+        return;
+    };
+    let params = agent_activity_params(agent, payload, state, &surface, unix_millis());
+    let _ = call_in_workspace_scope(client, workspace, "agent.activity", params).await;
+}
+
+fn agent_activity_params(
+    agent: agent_hooks::AgentKind,
+    payload: &Value,
+    state: &str,
+    surface: &str,
+    at_ms: u64,
+) -> Value {
+    let mut params = json!({
+        "surface_id": surface,
+        "agent": agent.store_name(),
+        "state": state,
+        "at_ms": at_ms,
+    });
+    if let Some(session) = hook_str(
+        payload,
+        &["session_id", "conversationId", "sessionId", "sessionID"],
+    ) {
+        params["session_id"] = Value::String(session.to_owned());
+    }
+    params
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn agent_hook_output(agent: agent_hooks::AgentKind, event: &str, payload: &Value) -> Value {
@@ -1779,6 +1877,7 @@ fn install_hook_target(agent: agent_hooks::AgentKind, osc: bool) -> Result<()> {
                 ("UserPromptSubmit", "prompt-submit"),
                 ("Stop", "stop"),
                 ("Notification", "notification"),
+                ("PostToolUse", "post-tool-use"),
                 ("SessionEnd", "session-end"),
             ],
         ),
@@ -4957,6 +5056,134 @@ mod cli_arg_tests {
             notification_surface_target(&[], env_value),
             Some("tab-stable".to_string())
         );
+    }
+
+    #[test]
+    fn claude_hook_events_map_to_live_states() {
+        use agent_hooks::AgentKind::{Claude, Codex};
+        let none = json!({});
+        let table = [
+            (
+                "session-start",
+                json!({"hook_event_name": "SessionStart", "source": "startup"}),
+                Some("idle"),
+            ),
+            (
+                "prompt-submit",
+                json!({"hook_event_name": "UserPromptSubmit", "prompt": "fix it"}),
+                Some("working"),
+            ),
+            (
+                "post-tool-use",
+                json!({"hook_event_name": "PostToolUse", "tool_name": "Bash"}),
+                Some("working"),
+            ),
+            (
+                "stop",
+                json!({"hook_event_name": "Stop", "stop_hook_active": false}),
+                Some("idle"),
+            ),
+            (
+                "session-end",
+                json!({"hook_event_name": "SessionEnd", "reason": "exit"}),
+                Some("ended"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "permission_prompt",
+                       "message": "Claude needs your permission to use Bash"}),
+                Some("needs_approval"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "elicitation_dialog",
+                       "message": "Claude has a question"}),
+                Some("needs_input"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "idle_prompt",
+                       "message": "Claude is waiting for your input"}),
+                Some("idle"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "auth_success"}),
+                None,
+            ),
+            // Older Claude Code: no type, only the message.
+            (
+                "notification",
+                json!({"message": "Claude needs your permission to use Write"}),
+                Some("needs_approval"),
+            ),
+            (
+                "notification",
+                json!({"message": "Claude is waiting for your input"}),
+                Some("idle"),
+            ),
+            ("notification", json!({"message": "something else"}), None),
+            ("subagent-stop", none.clone(), None),
+        ];
+        for (event, payload, state) in table {
+            assert_eq!(
+                agent_activity_state(Claude, event, &payload),
+                state,
+                "{event} {payload}"
+            );
+        }
+        // Other agents report no live state yet.
+        assert_eq!(agent_activity_state(Codex, "prompt-submit", &none), None);
+        assert_eq!(agent_activity_state(Codex, "stop", &none), None);
+    }
+
+    #[test]
+    fn agent_activity_params_name_the_terminal_session_and_time() {
+        let payload = json!({"session_id": "abc-123", "hook_event_name": "Stop"});
+        let params = agent_activity_params(
+            agent_hooks::AgentKind::Claude,
+            &payload,
+            "idle",
+            "7f0c-tab",
+            42,
+        );
+        assert_eq!(
+            params,
+            json!({
+                "surface_id": "7f0c-tab",
+                "agent": "claude",
+                "state": "idle",
+                "at_ms": 42,
+                "session_id": "abc-123",
+            })
+        );
+        let params = agent_activity_params(
+            agent_hooks::AgentKind::Claude,
+            &json!({}),
+            "working",
+            "t",
+            1,
+        );
+        assert!(params.get("session_id").is_none());
+    }
+
+    #[test]
+    fn claude_hook_install_includes_post_tool_use_for_live_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        install_json_hooks(
+            &path,
+            agent_hooks::AgentKind::Claude,
+            false,
+            &[("PostToolUse", "post-tool-use")],
+        )
+        .expect("install hooks");
+        let root: Value =
+            serde_json::from_slice(&fs::read(&path).expect("read settings")).expect("json");
+        assert!(root["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("command")
+            .contains("hooks claude post-tool-use"));
     }
 
     #[test]

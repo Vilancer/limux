@@ -386,6 +386,35 @@ tab, or another window in front) keeps its tab, output and workspace, marks them
 unread, and shows **Restart** and **Close**. A command that fails right after it
 starts is kept the same way, so its error stays readable.
 
+### Agent activity in the sidebar
+
+With Claude Code hooks installed (`limux hooks setup`), each terminal reports
+what its agent is doing, and the sidebar shows it without opening anything:
+
+| Sign | Meaning |
+|---|---|
+| `◆` | An agent asked for permission or a question and waits for you |
+| `●` | Unread: an agent finished a reply, or a terminal notified |
+| `↻` | An agent is working on a prompt |
+
+- A project row and its top-bar pill show one sign: waiting over unread over
+  working. The pill shows only waiting and unread.
+- A group header shows `↻ N` working and `◆ N` waiting terminals, also when the
+  group is collapsed. Clicking `◆ N` goes to the group's next waiting terminal.
+- A collapsed group keeps up to three waiting projects visible below its
+  header, the selected project not counted, then a **N more waiting** row that
+  goes to the next one.
+- `Ctrl+Alt+U` goes to the next terminal waiting for you, or to the next unread
+  terminal when nothing waits.
+- The `▸` on a project row lists its terminals, split panes in order with a line
+  between panes; background tabs are dimmed. Hovering a terminal outlines its
+  pane, and clicking it focuses that exact tab.
+- Looking at a waiting terminal does not clear it; only the agent continuing
+  does. Unread clears after a project has been on screen for about a second, so
+  passing through projects with `Ctrl+Alt+PageDown` keeps their marks.
+- Agent state is live only: after a restart it comes back when the agent next
+  reports. Other agents keep their notifications and show no live state yet.
+
 ## Architecture
 
 ```

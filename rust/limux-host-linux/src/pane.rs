@@ -478,6 +478,10 @@ pub const PANE_CSS: &str = r#"
     font-size: 9px;
     margin-right: 2px;
 }
+.limux-pane-outlined {
+    outline: 2px solid @accent_bg_color;
+    outline-offset: -2px;
+}
 .limux-tab-exited {
     opacity: 0.55;
     font-style: italic;
@@ -873,6 +877,98 @@ pub fn unread_tabs_in_pane(pane_widget: &gtk::Widget) -> Option<PaneUnreadTabs> 
         active_tab,
     })
 }
+
+/// One terminal tab, as the sidebar session list shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionTab {
+    pub tab_id: String,
+    pub title: String,
+    /// The pane's active tab, so it is on screen when the project is.
+    pub active: bool,
+    pub unread: bool,
+    /// The process ended and the tab is held with its output.
+    pub exited: bool,
+}
+
+/// A pane's terminal tabs in tab order.
+pub struct PaneSessionTabs {
+    pub pane_id: u32,
+    pub tabs: Vec<SessionTab>,
+}
+
+pub fn session_tabs_in_pane(pane_widget: &gtk::Widget) -> Option<PaneSessionTabs> {
+    let internals = find_pane_internals(pane_widget)?;
+    let state = internals.tab_state.borrow();
+    let tabs = state
+        .tabs
+        .iter()
+        .filter(|entry| matches!(entry.kind, TabKind::Terminal { .. }))
+        .map(|entry| SessionTab {
+            tab_id: entry.id.clone(),
+            title: entry.title_label.label().to_string(),
+            active: state.active_tab.as_deref() == Some(entry.id.as_str()),
+            unread: entry.unread,
+            exited: entry
+                .title_label
+                .has_css_class(exit_hold::EXITED_TAB_CSS_CLASS),
+        })
+        .collect();
+    Some(PaneSessionTabs {
+        pane_id: internals.pane_id,
+        tabs,
+    })
+}
+
+/// Every live terminal tab of every pane, keyed by tab id; `true` when its
+/// process has ended and the tab is only held.
+pub fn terminal_tabs_by_id() -> std::collections::HashMap<String, bool> {
+    PANE_REGISTRY.with(|registry| {
+        let mut tabs = std::collections::HashMap::new();
+        for internals in registry.borrow().values().filter_map(|weak| weak.upgrade()) {
+            for entry in &internals.tab_state.borrow().tabs {
+                if matches!(entry.kind, TabKind::Terminal { .. }) {
+                    let exited = entry
+                        .title_label
+                        .has_css_class(exit_hold::EXITED_TAB_CSS_CLASS);
+                    tabs.insert(entry.id.clone(), exited);
+                }
+            }
+        }
+        tabs
+    })
+}
+
+/// Terminal tab ids of a workspace, including panes hidden by zoom.
+pub fn terminal_tab_ids_in_workspace(workspace_id: &str) -> Vec<String> {
+    pane_internals_for_workspace(workspace_id)
+        .into_iter()
+        .flat_map(|internals| {
+            internals
+                .tab_state
+                .borrow()
+                .tabs
+                .iter()
+                .filter(|entry| matches!(entry.kind, TabKind::Terminal { .. }))
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Outline a pane while its session row is hovered or focused.
+pub fn set_pane_outlined(pane_id: u32, outlined: bool) {
+    if let Some(internals) = lookup_pane_internals(pane_id) {
+        if outlined {
+            internals.pane_outer.add_css_class(PANE_OUTLINED_CSS_CLASS);
+        } else {
+            internals
+                .pane_outer
+                .remove_css_class(PANE_OUTLINED_CSS_CLASS);
+        }
+    }
+}
+
+pub const PANE_OUTLINED_CSS_CLASS: &str = "limux-pane-outlined";
 
 pub fn active_tab_in_pane(pane_widget: &gtk::Widget) -> Option<String> {
     let internals = find_pane_internals(pane_widget)?;

@@ -1,0 +1,544 @@
+//! Live agent state in the window: the `agent.activity` control method, the
+//! one signal each project row and top-bar pill shows, the expandable
+//! session rows under a project, and the unread dwell.
+//!
+//! The rules live in `crate::agent_activity`; this module only reads panes,
+//! applies events to `AppState::agent_activity` and paints widgets.
+
+use super::*;
+use crate::agent_activity::{
+    self, ActivityCounts, AgentEvent, AgentPhase, ProjectSignal, GLYPH_UNREAD, GLYPH_WAITING,
+    GLYPH_WORKING,
+};
+
+/// How long a project must stay on screen before its unread marks clear, so
+/// passing through projects (`Ctrl+Alt+PageDown`) does not wipe them.
+const UNREAD_DWELL: std::time::Duration = std::time::Duration::from_millis(1000);
+/// How often closed terminals are pruned and open session lists refreshed.
+const ACTIVITY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+const GLYPH_EXITED: &str = "\u{2715}"; // ✕
+
+/// One row of a project's session list, as last drawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SessionRowView {
+    pane_id: u32,
+    tab_id: String,
+    title: String,
+    /// First terminal of a pane after the first one: a hairline goes above.
+    pane_start: bool,
+    /// Not the pane's active tab, so not on screen when the project is.
+    background: bool,
+    glyph: &'static str,
+    state_label: &'static str,
+    agent: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Counts and signals
+// ---------------------------------------------------------------------------
+
+/// Working and waiting terminals of a workspace.
+pub(super) fn workspace_activity_counts(s: &AppState, workspace_id: &str) -> ActivityCounts {
+    let mut counts = ActivityCounts::default();
+    if s.agent_activity.is_empty() {
+        return counts;
+    }
+    for tab_id in pane::terminal_tab_ids_in_workspace(workspace_id) {
+        counts.add_phase(s.agent_activity.phase(&tab_id));
+    }
+    counts
+}
+
+/// Paint the row dot and the pill dot from the project signal.
+pub(super) fn set_workspace_signal_visual(
+    workspace: &Workspace,
+    signal: ProjectSignal,
+    counts: ActivityCounts,
+) {
+    let dot = &workspace.notify_dot;
+    for class in [
+        "limux-notify-dot",
+        "limux-notify-dot-hidden",
+        "limux-notify-dot-waiting",
+        "limux-notify-dot-working",
+    ] {
+        dot.remove_css_class(class);
+    }
+    let (glyph, classes, tooltip): (&str, &[&str], Option<String>) = match signal {
+        ProjectSignal::Waiting => (
+            GLYPH_WAITING,
+            &["limux-notify-dot", "limux-notify-dot-waiting"],
+            agent_activity::counts_summary(counts),
+        ),
+        ProjectSignal::Unread => (
+            GLYPH_UNREAD,
+            &["limux-notify-dot"],
+            Some("Unread".to_string()),
+        ),
+        ProjectSignal::Working => (
+            GLYPH_WORKING,
+            &["limux-notify-dot-working"],
+            agent_activity::counts_summary(counts),
+        ),
+        ProjectSignal::None => (GLYPH_UNREAD, &["limux-notify-dot-hidden"], None),
+    };
+    dot.set_label(glyph);
+    for class in classes {
+        dot.add_css_class(class);
+    }
+    dot.set_tooltip_text(tooltip.as_deref());
+    let label = match &tooltip {
+        Some(tooltip) => format!("{}, {tooltip}", workspace.name),
+        None => workspace.name.clone(),
+    };
+    workspace
+        .sidebar_row
+        .update_property(&[gtk::accessible::Property::Label(&label)]);
+
+    // The pill only says "needs attention": waiting, else unread.
+    let pill_dot = &workspace.indicator_unread_dot;
+    pill_dot.remove_css_class("limux-indicator-waiting-dot");
+    match signal {
+        ProjectSignal::Waiting => {
+            pill_dot.set_label(GLYPH_WAITING);
+            pill_dot.add_css_class("limux-indicator-waiting-dot");
+        }
+        _ => pill_dot.set_label(GLYPH_UNREAD),
+    }
+    workspace.indicator_button.set_tooltip_text(
+        signal
+            .needs_attention()
+            .then(|| match signal {
+                ProjectSignal::Waiting => format!("{}: needs you", workspace.name),
+                _ => format!("{}: unread", workspace.name),
+            })
+            .as_deref(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+pub(super) fn handle_agent_activity(
+    state: &State,
+    target: &WorkspaceTarget,
+    surface_hint: &str,
+    agent: String,
+    phase: Option<AgentPhase>,
+    session_id: Option<String>,
+    at_ms: u64,
+) -> Result<serde_json::Value, BridgeError> {
+    let preferred = workspace_index_for_target(&state.borrow(), target)
+        .or_else(|| (!state.borrow().workspaces.is_empty()).then_some(0))
+        .ok_or_else(|| BridgeError::not_found("workspace not found"))?;
+    let pane::HintResolution::Unique((_, _, tab_id)) =
+        surface_tab_target(state, preferred, false, surface_hint, true)
+    else {
+        return Err(BridgeError::not_found("terminal not found"));
+    };
+    // A held, exited terminal has no agent; a late hook must not revive it.
+    if pane::terminal_tabs_by_id().get(&tab_id).copied() == Some(true) {
+        return Ok(serde_json::json!({ "tab_id": tab_id, "changed": false }));
+    }
+    let changed = state.borrow_mut().agent_activity.apply(AgentEvent {
+        tab_id: tab_id.clone(),
+        agent,
+        phase,
+        session_id,
+        at_ms,
+    });
+    if changed {
+        refresh_activity(state);
+    }
+    Ok(serde_json::json!({ "tab_id": tab_id, "changed": changed }))
+}
+
+/// Forget terminals that closed or exited. Returns whether any were dropped.
+fn prune_activity(state: &State) -> bool {
+    if state.borrow().agent_activity.is_empty() {
+        return false;
+    }
+    let tabs = pane::terminal_tabs_by_id();
+    state
+        .borrow_mut()
+        .agent_activity
+        .retain_tabs(|tab_id| tabs.get(tab_id) == Some(&false))
+}
+
+/// Repaint everything that reads agent state: project and pill signals, group
+/// headers and their waiting rows, and open session lists.
+pub(super) fn refresh_activity(state: &State) {
+    prune_activity(state);
+    let ids: Vec<String> = state
+        .borrow()
+        .workspaces
+        .iter()
+        .map(|workspace| workspace.id.clone())
+        .collect();
+    for id in &ids {
+        sync_workspace_unread(state, id);
+    }
+    sidebar_groups::sync_row_visibility(state);
+}
+
+pub(super) fn install_activity_timer(state: &State) {
+    let weak = Rc::downgrade(state);
+    glib::timeout_add_local(ACTIVITY_REFRESH_INTERVAL, move || {
+        let Some(state) = weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        if prune_activity(&state) {
+            refresh_activity(&state);
+        } else {
+            let expanded: Vec<String> = state.borrow().expanded_sessions.iter().cloned().collect();
+            for id in expanded {
+                refresh_session_rows(&state, &id, false);
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Unread dwell
+// ---------------------------------------------------------------------------
+
+/// Clear the shown project's unread marks once it has stayed on screen for
+/// `UNREAD_DWELL`, in an active window. Every visible pane counts, not only
+/// the focused one. A newer switch cancels the pending clear.
+pub(super) fn schedule_unread_clear(state: &State, workspace_id: &str) {
+    let epoch = {
+        let mut s = state.borrow_mut();
+        s.unread_dwell_epoch = s.unread_dwell_epoch.wrapping_add(1);
+        s.unread_dwell_epoch
+    };
+    let weak = Rc::downgrade(state);
+    let workspace_id = workspace_id.to_string();
+    glib::timeout_add_local_once(UNREAD_DWELL, move || {
+        let Some(state) = weak.upgrade() else {
+            return;
+        };
+        let still_shown = {
+            let s = state.borrow();
+            s.unread_dwell_epoch == epoch
+                && s.active_workspace()
+                    .is_some_and(|workspace| workspace.id == workspace_id)
+        };
+        if still_shown {
+            clear_visible_tab_unread(&state, &workspace_id);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Session rows
+// ---------------------------------------------------------------------------
+
+fn agent_label(agent: &str) -> String {
+    match agent {
+        "claude" => "Claude".to_string(),
+        "codex" => "Codex".to_string(),
+        "gemini" => "Gemini".to_string(),
+        "opencode" => "OpenCode".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn session_row_views(s: &AppState, root: &gtk::Widget) -> Vec<SessionRowView> {
+    let mut panes = Vec::new();
+    collect_leaf_panes(root, &mut panes);
+    let mut views = Vec::new();
+    let mut pane_index = 0;
+    for pane_widget in &panes {
+        let Some(pane::PaneSessionTabs { pane_id, tabs }) = pane::session_tabs_in_pane(pane_widget)
+        else {
+            continue;
+        };
+        if tabs.is_empty() {
+            continue;
+        }
+        for (index, tab) in tabs.into_iter().enumerate() {
+            let activity = s.agent_activity.get(&tab.tab_id);
+            let (glyph, state_label) = if tab.exited {
+                (GLYPH_EXITED, "exited")
+            } else {
+                agent_activity::session_glyph(activity.map(|a| a.phase), tab.unread)
+            };
+            views.push(SessionRowView {
+                pane_id,
+                tab_id: tab.tab_id,
+                title: tab.title,
+                pane_start: pane_index > 0 && index == 0,
+                background: !tab.active,
+                glyph,
+                state_label,
+                agent: activity.map(|activity| agent_label(&activity.agent)),
+            });
+        }
+        pane_index += 1;
+    }
+    views
+}
+
+/// Add the expand toggle and the (empty, hidden) session list to a project row.
+pub(super) fn attach_session_list(
+    state: &State,
+    workspace_id: &str,
+    row: &gtk::ListBoxRow,
+) -> (gtk::Button, gtk::Box) {
+    let toggle = gtk::Button::with_label("\u{25B8}");
+    toggle.add_css_class("flat");
+    toggle.add_css_class("limux-ws-sessions-toggle");
+    toggle.set_focus_on_click(false);
+    toggle.set_valign(gtk::Align::Center);
+    toggle.set_tooltip_text(Some("Show terminals"));
+    toggle.update_property(&[gtk::accessible::Property::Label("Show terminals")]);
+
+    let sessions = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    sessions.add_css_class("limux-ws-sessions");
+    sessions.set_visible(false);
+
+    if let Some(vbox) = row.child().and_downcast::<gtk::Box>() {
+        if let Some(top_row) = vbox.first_child().and_downcast::<gtk::Box>() {
+            top_row.prepend(&toggle);
+        }
+        vbox.append(&sessions);
+    }
+
+    let state = state.clone();
+    let workspace_id = workspace_id.to_string();
+    toggle.connect_clicked(move |_| {
+        {
+            let mut s = state.borrow_mut();
+            if !s.expanded_sessions.remove(&workspace_id) {
+                s.expanded_sessions.insert(workspace_id.clone());
+            }
+        }
+        refresh_session_rows(&state, &workspace_id, true);
+    });
+    (toggle, sessions)
+}
+
+/// Rebuild a project's session list when it is open and its rows changed
+/// (or always with `force`), and hide it when it is closed.
+pub(super) fn refresh_session_rows(state: &State, workspace_id: &str, force: bool) {
+    let (expanded, toggle, container, root, old) = {
+        let s = state.borrow();
+        let Some(workspace) = s
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            return;
+        };
+        (
+            s.expanded_sessions.contains(workspace_id),
+            workspace.sessions_toggle.clone(),
+            workspace.sessions_box.clone(),
+            workspace.root.clone(),
+            s.session_views.get(workspace_id).cloned(),
+        )
+    };
+    let (chevron, tip) = if expanded {
+        ("\u{25BE}", "Hide terminals")
+    } else {
+        ("\u{25B8}", "Show terminals")
+    };
+    toggle.set_label(chevron);
+    toggle.set_tooltip_text(Some(tip));
+    toggle.update_property(&[gtk::accessible::Property::Label(tip)]);
+    toggle.update_state(&[gtk::accessible::State::Expanded(Some(expanded))]);
+
+    if !expanded {
+        container.set_visible(false);
+        if let Some(old) = old {
+            clear_outlines(&old);
+            state.borrow_mut().session_views.remove(workspace_id);
+            clear_children(&container);
+        }
+        return;
+    }
+    let views = session_row_views(&state.borrow(), &root);
+    if !force && old.as_ref() == Some(&views) {
+        return;
+    }
+    if let Some(old) = &old {
+        clear_outlines(old);
+    }
+    clear_children(&container);
+    if views.is_empty() {
+        let empty = gtk::Label::new(Some("No terminals"));
+        empty.set_xalign(0.0);
+        empty.add_css_class("limux-session-empty");
+        container.append(&empty);
+    }
+    for view in &views {
+        if view.pane_start {
+            let gap = gtk::Separator::new(gtk::Orientation::Horizontal);
+            gap.add_css_class("limux-session-pane-gap");
+            container.append(&gap);
+        }
+        container.append(&build_session_row(state, workspace_id, view));
+    }
+    container.set_visible(true);
+    state
+        .borrow_mut()
+        .session_views
+        .insert(workspace_id.to_string(), views);
+}
+
+fn clear_children(container: &gtk::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+}
+
+fn clear_outlines(views: &[SessionRowView]) {
+    for view in views {
+        pane::set_pane_outlined(view.pane_id, false);
+    }
+}
+
+fn build_session_row(state: &State, workspace_id: &str, view: &SessionRowView) -> gtk::Button {
+    let glyph = gtk::Label::new(Some(view.glyph));
+    glyph.add_css_class("limux-session-glyph");
+    match view.state_label {
+        "needs approval" | "needs input" => glyph.add_css_class("limux-session-waiting"),
+        "unread" => glyph.add_css_class("limux-session-unread"),
+        _ => {}
+    }
+    let title = gtk::Label::builder()
+        .label(&view.title)
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .build();
+    title.add_css_class("limux-session-title");
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    content.append(&glyph);
+    content.append(&title);
+    if let Some(agent) = &view.agent {
+        let agent = gtk::Label::new(Some(agent));
+        agent.add_css_class("limux-session-agent");
+        content.append(&agent);
+    }
+
+    let button = gtk::Button::builder()
+        .child(&content)
+        .focus_on_click(false)
+        .build();
+    button.add_css_class("flat");
+    button.add_css_class("limux-session-row");
+    if view.background {
+        button.add_css_class("limux-session-row-background");
+    }
+    let spoken = match &view.agent {
+        Some(agent) => format!("{}, {agent}, {}", view.title, view.state_label),
+        None => format!("{}, {}", view.title, view.state_label),
+    };
+    button.set_tooltip_text(Some(&spoken));
+    button.update_property(&[gtk::accessible::Property::Label(&spoken)]);
+
+    let pane_id = view.pane_id;
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_enter(move |_, _, _| pane::set_pane_outlined(pane_id, true));
+    motion.connect_leave(move |_| pane::set_pane_outlined(pane_id, false));
+    button.add_controller(motion);
+    let focus = gtk::EventControllerFocus::new();
+    focus.connect_enter(move |_| pane::set_pane_outlined(pane_id, true));
+    focus.connect_leave(move |_| pane::set_pane_outlined(pane_id, false));
+    button.add_controller(focus);
+
+    let state = state.clone();
+    let target = DesktopNotificationTarget {
+        workspace_id: workspace_id.to_string(),
+        pane_id: Some(view.pane_id),
+        tab_id: Some(view.tab_id.clone()),
+    };
+    button.connect_clicked(move |_| {
+        pane::set_pane_outlined(pane_id, false);
+        activate_desktop_notification_target(&state, &target, None);
+    });
+    button
+}
+
+pub(super) fn agent_activity_css() -> &'static str {
+    r#"
+/* ---------- Agent activity ---------- */
+.limux-notify-dot-waiting {
+    font-weight: 700;
+}
+.limux-notify-dot-working {
+    color: alpha(@window_fg_color, 0.65);
+    font-size: 10px;
+    margin-right: 6px;
+}
+.limux-sidebar-list row .limux-ws-colored .limux-notify-dot-working {
+    color: alpha(white, 0.85);
+}
+.limux-indicator-waiting-dot {
+    font-size: 9px;
+}
+.limux-ws-sessions-toggle {
+    min-width: 16px;
+    min-height: 16px;
+    padding: 0;
+    margin-right: 2px;
+    font-size: 10px;
+    color: alpha(@window_fg_color, 0.55);
+}
+.limux-ws-sessions {
+    margin: 2px 0 0 14px;
+}
+.limux-session-row {
+    min-height: 22px;
+    padding: 1px 6px;
+    border-radius: 6px;
+}
+.limux-session-row-background .limux-session-title {
+    opacity: 0.55;
+}
+.limux-session-glyph {
+    min-width: 12px;
+    font-size: 10px;
+    color: alpha(@window_fg_color, 0.65);
+}
+.limux-session-title {
+    font-size: 12px;
+}
+.limux-session-agent {
+    font-size: 10px;
+    color: alpha(@window_fg_color, 0.5);
+}
+.limux-session-pane-gap {
+    margin: 2px 6px;
+    opacity: 0.5;
+}
+.limux-session-empty {
+    font-size: 11px;
+    color: alpha(@window_fg_color, 0.4);
+    margin-left: 6px;
+}
+.limux-ws-group-working {
+    color: alpha(white, 0.7);
+    font-size: 11px;
+    margin-left: 6px;
+}
+.limux-ws-group-waiting {
+    min-height: 0;
+    padding: 0 6px;
+    margin-left: 4px;
+    font-size: 11px;
+    font-weight: 700;
+}
+.limux-ws-group-more {
+    min-height: 0;
+    padding: 1px 10px;
+    margin: 0 6px 0 22px;
+    font-size: 11px;
+    color: alpha(@window_fg_color, 0.65);
+}
+"#
+}

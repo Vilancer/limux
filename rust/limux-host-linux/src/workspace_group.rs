@@ -5,7 +5,7 @@
 //! sidebar, and a group's favorites come first among its members. This module owns that order and its rules; the GTK rows only
 //! mirror it, and `AppState::workspaces` follows `workspace_order`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::layout_state::WorkspaceGroupState;
 use crate::workspace_color::WorkspaceColor;
@@ -72,14 +72,61 @@ pub enum SidebarRow<'a> {
 
 impl SidebarRow<'_> {
     /// Whether the row is shown: a collapsed group hides its members, except
-    /// the active workspace until the user switches away from it.
-    pub fn visible(&self, active_workspace_id: Option<&str>) -> bool {
+    /// the active workspace until the user switches away from it, and the
+    /// waiting workspaces in `previews`.
+    pub fn visible(&self, active_workspace_id: Option<&str>, previews: &WaitingPreviews) -> bool {
         match self {
             Self::GroupHeader(_) => true,
             Self::Workspace { id, group } => {
-                group.is_none_or(|group| !group.collapsed) || active_workspace_id == Some(*id)
+                group.is_none_or(|group| !group.collapsed)
+                    || active_workspace_id == Some(*id)
+                    || previews.shown.contains(*id)
             }
         }
+    }
+}
+
+/// Waiting workspaces a collapsed group shows below its header.
+pub const WAITING_PREVIEW_CAP: usize = 3;
+
+/// Members of collapsed groups that stay visible because a terminal in them
+/// needs the user, and the waiting members each group had to leave out.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WaitingPreviews {
+    pub shown: HashSet<String>,
+    /// Group id → hidden waiting members, in sidebar order.
+    pub more: HashMap<String, Vec<String>>,
+}
+
+impl SidebarLayout {
+    /// For every collapsed group: its first `cap` waiting members in sidebar
+    /// order stay visible. The active workspace is visible anyway and does
+    /// not count toward the cap.
+    pub fn waiting_previews(
+        &self,
+        active_workspace_id: Option<&str>,
+        is_waiting: impl Fn(&str) -> bool,
+        cap: usize,
+    ) -> WaitingPreviews {
+        let mut previews = WaitingPreviews::default();
+        for group in self.groups().filter(|group| group.collapsed) {
+            let waiting = group
+                .members
+                .iter()
+                .filter(|id| Some(id.as_str()) != active_workspace_id && is_waiting(id));
+            for (index, id) in waiting.enumerate() {
+                if index < cap {
+                    previews.shown.insert(id.clone());
+                } else {
+                    previews
+                        .more
+                        .entry(group.id.clone())
+                        .or_default()
+                        .push(id.clone());
+                }
+            }
+        }
+        previews
     }
 }
 
@@ -932,7 +979,7 @@ mod tests {
                 .rows()
                 .iter()
                 .zip(render(layout))
-                .filter(|(row, _)| row.visible(active))
+                .filter(|(row, _)| row.visible(active, &WaitingPreviews::default()))
                 .map(|(_, text)| text)
                 .collect()
         }
@@ -940,6 +987,42 @@ mod tests {
         assert_eq!(visible(&layout, Some("b")), ["[G]", "G/b", "c"]);
         layout.set_group_collapsed(&g, false).unwrap();
         assert_eq!(visible(&layout, Some("c")), ["[G]", "G/a", "G/b", "c"]);
+    }
+
+    #[test]
+    fn collapsed_groups_keep_up_to_three_waiting_members_visible() {
+        let mut layout = layout(&["a", "b", "c", "d", "e", "f", "x"]);
+        let g = layout
+            .create_group(Some("G"), None, &ids(&["a", "b", "c", "d", "e", "f"]))
+            .unwrap();
+        let waiting = |id: &str| ["a", "c", "d", "e", "f"].contains(&id);
+        // Expanded: nothing to preview.
+        assert_eq!(
+            layout.waiting_previews(None, waiting, 3),
+            WaitingPreviews::default()
+        );
+
+        layout.set_group_collapsed(&g, true).unwrap();
+        let previews = layout.waiting_previews(Some("x"), waiting, 3);
+        let mut shown: Vec<_> = previews.shown.iter().cloned().collect();
+        shown.sort();
+        assert_eq!(shown, ["a", "c", "d"]);
+        assert_eq!(previews.more[&g], ["e", "f"]);
+        let visible: Vec<String> = layout
+            .rows()
+            .iter()
+            .zip(render(&layout))
+            .filter(|(row, _)| row.visible(Some("x"), &previews))
+            .map(|(_, text)| text)
+            .collect();
+        assert_eq!(visible, ["[G]", "G/a", "G/c", "G/d", "x"]);
+
+        // The selected member is shown anyway and does not use a slot.
+        let previews = layout.waiting_previews(Some("c"), waiting, 3);
+        let mut shown: Vec<_> = previews.shown.iter().cloned().collect();
+        shown.sort();
+        assert_eq!(shown, ["a", "d", "e"]);
+        assert_eq!(previews.more[&g], ["f"]);
     }
 
     #[test]

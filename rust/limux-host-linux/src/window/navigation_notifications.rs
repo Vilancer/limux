@@ -357,9 +357,24 @@ pub(super) fn next_unread_stop(
     }
 }
 
-/// Jump to the next (or previous) unread terminal in sidebar order, across
-/// projects and collapsed groups, and focus that exact tab.
+/// Jump to the next (or previous) terminal that needs the user, in sidebar
+/// order across projects and collapsed groups, and focus that exact tab:
+/// an agent waiting for approval or input first, else an unread terminal.
 pub(super) fn cycle_unread_terminal(state: &State, forward: bool) {
+    cycle_attention_terminal(state, forward, None);
+}
+
+/// As `cycle_unread_terminal`; with `group`, only the waiting terminals of
+/// that group's projects (the group header's waiting button).
+pub(super) fn cycle_attention_terminal(state: &State, forward: bool, group: Option<&str>) {
+    let members = group.map(|group| {
+        state
+            .borrow()
+            .sidebar
+            .group(group)
+            .map(|group| group.members().to_vec())
+            .unwrap_or_default()
+    });
     let (workspaces, active_idx) = {
         let s = state.borrow();
         let workspaces = s
@@ -379,7 +394,15 @@ pub(super) fn cycle_unread_terminal(state: &State, forward: bool) {
     let mut current = (active_idx, 0, 0);
     let mut stops = Vec::new();
     let mut targets = Vec::new();
+    let mut waiting_stops = Vec::new();
+    let mut waiting_targets = Vec::new();
     for (workspace_idx, (workspace_id, root, workspace_unread)) in workspaces.iter().enumerate() {
+        if members
+            .as_ref()
+            .is_some_and(|members| !members.contains(workspace_id))
+        {
+            continue;
+        }
         let mut panes = Vec::new();
         collect_leaf_panes(root, &mut panes);
         let mut tab_unread = false;
@@ -397,6 +420,21 @@ pub(super) fn cycle_unread_terminal(state: &State, forward: bool) {
                 .is_some_and(|(id, focused_pane)| id == workspace_id && focused_pane == pane_widget)
             {
                 current = (workspace_idx, pane_idx, active_tab);
+            }
+            for (tab_idx, tab_id) in pane::tab_ids_in_pane(pane_widget).into_iter().enumerate() {
+                let waiting = state
+                    .borrow()
+                    .agent_activity
+                    .phase(&tab_id)
+                    .is_some_and(crate::agent_activity::AgentPhase::is_waiting);
+                if waiting {
+                    waiting_stops.push((workspace_idx, pane_idx, tab_idx));
+                    waiting_targets.push(DesktopNotificationTarget {
+                        workspace_id: workspace_id.clone(),
+                        pane_id: Some(pane_id),
+                        tab_id: Some(tab_id),
+                    });
+                }
             }
             for (tab_idx, tab_id) in unread_tabs {
                 tab_unread = true;
@@ -418,6 +456,10 @@ pub(super) fn cycle_unread_terminal(state: &State, forward: bool) {
             });
         }
     }
+    if !waiting_stops.is_empty() || group.is_some() {
+        stops = waiting_stops;
+        targets = waiting_targets;
+    }
     if let Some(index) = next_unread_stop(&stops, current, forward) {
         activate_desktop_notification_target(state, &targets[index], None);
     }
@@ -427,12 +469,43 @@ pub(super) fn has_unread(workspace_unread: bool, tab_unread: bool) -> bool {
     workspace_unread || tab_unread
 }
 
-pub(super) fn set_workspace_unread_visual(workspace: &Workspace, unread: bool) {
-    if unread {
+/// Paint unread on a project row and pill. The row dot and pill dot show the
+/// project signal (waiting, unread or working), painted with it.
+pub(super) fn set_workspace_unread_visual(
+    workspace: &Workspace,
+    unread: bool,
+    counts: crate::agent_activity::ActivityCounts,
+) {
+    let signal = crate::agent_activity::ProjectSignal::of(counts, unread);
+    agent_activity_ui::set_workspace_signal_visual(workspace, signal, counts);
+    let attention = signal.needs_attention();
+    if attention {
         workspace
-            .notify_dot
-            .remove_css_class("limux-notify-dot-hidden");
-        workspace.notify_dot.add_css_class("limux-notify-dot");
+            .indicator_button
+            .add_css_class("limux-indicator-pill-unread");
+    } else {
+        workspace
+            .indicator_button
+            .remove_css_class("limux-indicator-pill-unread");
+    }
+    if attention {
+        workspace
+            .indicator_unread_dot
+            .remove_css_class("limux-indicator-unread-dot-hidden");
+        workspace
+            .indicator_unread_dot
+            .add_css_class("limux-indicator-unread-dot");
+        workspace.indicator_unread_dot.set_visible(true);
+    } else {
+        workspace
+            .indicator_unread_dot
+            .remove_css_class("limux-indicator-unread-dot");
+        workspace
+            .indicator_unread_dot
+            .add_css_class("limux-indicator-unread-dot-hidden");
+        workspace.indicator_unread_dot.set_visible(false);
+    }
+    if unread {
         workspace.notify_label.remove_css_class("limux-notify-msg");
         workspace
             .notify_label
@@ -443,21 +516,7 @@ pub(super) fn set_workspace_unread_visual(workspace: &Workspace, unread: bool) {
         if let Some(row_box) = workspace.sidebar_row.child() {
             row_box.add_css_class("limux-sidebar-row-unread");
         }
-        workspace
-            .indicator_button
-            .add_css_class("limux-indicator-pill-unread");
-        workspace
-            .indicator_unread_dot
-            .remove_css_class("limux-indicator-unread-dot-hidden");
-        workspace
-            .indicator_unread_dot
-            .add_css_class("limux-indicator-unread-dot");
-        workspace.indicator_unread_dot.set_visible(true);
     } else {
-        workspace.notify_dot.remove_css_class("limux-notify-dot");
-        workspace
-            .notify_dot
-            .add_css_class("limux-notify-dot-hidden");
         workspace
             .notify_label
             .remove_css_class("limux-notify-msg-unread");
@@ -467,16 +526,6 @@ pub(super) fn set_workspace_unread_visual(workspace: &Workspace, unread: bool) {
         if let Some(row_box) = workspace.sidebar_row.child() {
             row_box.remove_css_class("limux-sidebar-row-unread");
         }
-        workspace
-            .indicator_button
-            .remove_css_class("limux-indicator-pill-unread");
-        workspace
-            .indicator_unread_dot
-            .remove_css_class("limux-indicator-unread-dot");
-        workspace
-            .indicator_unread_dot
-            .add_css_class("limux-indicator-unread-dot-hidden");
-        workspace.indicator_unread_dot.set_visible(false);
     }
 }
 
@@ -489,9 +538,20 @@ pub(super) fn sync_workspace_unread(state: &State, ws_id: &str) {
         workspace.unread || workspace.manual_unread
     };
     let tab_unread = pane::workspace_has_unread_tabs(ws_id);
-    let s = state.borrow();
-    if let Some(workspace) = s.workspaces.iter().find(|workspace| workspace.id == ws_id) {
-        set_workspace_unread_visual(workspace, has_unread(workspace_unread, tab_unread));
+    let expanded = {
+        let s = state.borrow();
+        if let Some(workspace) = s.workspaces.iter().find(|workspace| workspace.id == ws_id) {
+            let counts = agent_activity_ui::workspace_activity_counts(&s, ws_id);
+            set_workspace_unread_visual(
+                workspace,
+                has_unread(workspace_unread, tab_unread),
+                counts,
+            );
+        }
+        s.expanded_sessions.contains(ws_id)
+    };
+    if expanded {
+        agent_activity_ui::refresh_session_rows(state, ws_id, false);
     }
 }
 
