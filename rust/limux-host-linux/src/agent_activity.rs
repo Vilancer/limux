@@ -206,6 +206,42 @@ pub fn counts_summary(counts: ActivityCounts) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
+/// What a pending-panel entry is: an agent waiting for the user, or an
+/// unread terminal (a finished reply or a notification).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PendingKind {
+    Waiting,
+    Unread,
+}
+
+/// Order pending entries `(kind, at_ms, item)`: waiting first, then unread,
+/// newest first within each; ties keep their sidebar order.
+pub fn sort_pending<T>(entries: &mut [(PendingKind, u64, T)]) {
+    entries.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+}
+
+/// "now", "5m", "3h", "2d": how long ago `at_ms` was; empty when unknown.
+pub fn ago_label(now_ms: u64, at_ms: u64) -> String {
+    if at_ms == 0 {
+        return String::new();
+    }
+    let minutes = now_ms.saturating_sub(at_ms) / 60_000;
+    match minutes {
+        0 => "now".to_string(),
+        1..=59 => format!("{minutes}m"),
+        60..=1439 => format!("{}h", minutes / 60),
+        _ => format!("{}d", minutes / 1440),
+    }
+}
+
+/// Now, in Unix ms.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +386,41 @@ mod tests {
             .as_deref(),
             Some("2 need you")
         );
+    }
+
+    #[test]
+    fn pending_entries_put_waiting_first_then_newest() {
+        let mut entries = vec![
+            (PendingKind::Unread, 10, "old reply"),
+            (PendingKind::Waiting, 5, "old question"),
+            (PendingKind::Unread, 30, "new reply"),
+            (PendingKind::Waiting, 20, "new question"),
+            (PendingKind::Unread, 30, "same time, later in sidebar"),
+        ];
+        sort_pending(&mut entries);
+        let order: Vec<&str> = entries.iter().map(|(_, _, item)| *item).collect();
+        assert_eq!(
+            order,
+            [
+                "new question",
+                "old question",
+                "new reply",
+                "same time, later in sidebar",
+                "old reply"
+            ]
+        );
+    }
+
+    #[test]
+    fn ago_labels_round_down() {
+        let now = 10 * 24 * 3_600_000;
+        assert_eq!(ago_label(now, 0), "");
+        assert_eq!(ago_label(now, now - 30_000), "now");
+        assert_eq!(ago_label(now, now - 5 * 60_000), "5m");
+        assert_eq!(ago_label(now, now - 3 * 3_600_000 - 1), "3h");
+        assert_eq!(ago_label(now, now - 2 * 86_400_000), "2d");
+        // A clock that went backwards reads as now.
+        assert_eq!(ago_label(now, now + 60_000), "now");
     }
 
     #[test]

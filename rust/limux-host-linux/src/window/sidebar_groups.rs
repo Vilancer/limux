@@ -35,7 +35,7 @@ pub(super) struct GroupHeader {
     more_button: gtk::Button,
 }
 
-fn group_color_class(color: WorkspaceColor) -> String {
+pub(super) fn group_color_class(color: WorkspaceColor) -> String {
     format!("limux-ws-group-{}", color.as_str())
 }
 
@@ -93,7 +93,8 @@ pub(super) fn workspace_group_css() -> String {
         css.push_str(&format!(
             ".limux-ws-group-pill.{class} {{\n    background: {hex};\n}}\n\
              .limux-sidebar-list row.{MEMBER_CSS_CLASS}.{class} {{\n    box-shadow: inset 3px 0 0 0 {hex};\n}}\n\
-             .{DOT_CSS_PREFIX}{name} {{\n    color: {hex};\n}}\n",
+             .{DOT_CSS_PREFIX}{name} {{\n    color: {hex};\n}}\n\
+             .limux-pending-row.{class} {{\n    box-shadow: inset 3px 0 0 0 {hex};\n}}\n",
             name = color.as_str(),
         ));
     }
@@ -645,10 +646,17 @@ pub(super) fn sync_row_visibility(state: &State) {
         rows
     };
     set_rows_visible(&rows);
+    pending_panel::sync(state);
 }
 
-/// Refresh the groups' working, waiting and unread counts on their headers.
+/// Refresh the groups' working, waiting and unread counts on their headers,
+/// and the pending counter.
 pub(super) fn sync_group_headers(state: &State) {
+    paint_group_headers(state);
+    pending_panel::sync(state);
+}
+
+fn paint_group_headers(state: &State) {
     let s = state.borrow();
     let activity = group_activity(&s);
     for group in s.sidebar.groups() {

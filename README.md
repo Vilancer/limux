@@ -373,6 +373,7 @@ time, enable **Settings → General → Ask for folder on new workspace**.
 | `Ctrl+Alt+O` | Switch to the most recent workspace, back to the pane you left |
 | `Ctrl+Alt+U` | Go to the next unread terminal, across workspaces and collapsed groups |
 | `Ctrl+Alt+Shift+U` | Go to the previous unread terminal |
+| `Ctrl+Alt+P` | Show the terminals waiting for you or unread, and jump to one |
 
 Switching back to a workspace returns to the pane you last used there, with its
 active tab.
@@ -424,6 +425,14 @@ its hooks when a session starts, so restart running sessions afterwards.
   the header goes to the group's next working terminal, without expanding it.
 - `Ctrl+Alt+U` goes to the next terminal waiting for you, or to the next unread
   terminal when nothing waits.
+- A counter next to the folder button shows `◆ N` while terminals wait for you,
+  else `● N` unread, and hides when nothing is pending. It follows the toolbar:
+  the top bar, the sidebar header, or, with both hidden (full screen), the
+  terminal's header next to the sidebar toggle. Clicking it or pressing
+  `Ctrl+Alt+P` opens a list of those terminals, waiting ones first, newest
+  first, each with its project, terminal and latest message. Picking one
+  focuses that terminal without expanding its group. **Mark all read** clears
+  unread marks only; a waiting terminal stays until the agent continues.
 - The `▸` on a project row lists its terminals, split panes in order with a line
   between panes; background tabs are dimmed. Hovering a terminal outlines its
   pane, and clicking it focuses that exact tab.

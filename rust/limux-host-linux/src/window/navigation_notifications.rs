@@ -664,6 +664,12 @@ pub(super) fn mark_workspace_unread_with_message(
         )
     };
     let workspace_is_active = workspace_idx == active_idx;
+    pending_panel::note_message(
+        &mut state.borrow_mut(),
+        ws_id,
+        target.tab_id.as_deref(),
+        message,
+    );
     let desktop_request = should_emit_desktop_notification(
         notifications.enabled,
         window_active,
