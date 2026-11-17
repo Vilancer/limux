@@ -406,8 +406,8 @@ fn cycle_terminals(state: &State, forward: bool, group: Option<&str>, working: b
     let mut current = (active_idx, 0, 0);
     let mut stops = Vec::new();
     let mut targets = Vec::new();
-    let mut waiting_stops = Vec::new();
-    let mut waiting_targets = Vec::new();
+    let mut agent_stops = Vec::new();
+    let mut agent_targets = Vec::new();
     for (workspace_idx, (workspace_id, panes, workspace_unread)) in workspaces.iter().enumerate() {
         if members
             .as_ref()
@@ -439,8 +439,8 @@ fn cycle_terminals(state: &State, forward: bool, group: Option<&str>, working: b
                     phase.is_some_and(crate::agent_activity::AgentPhase::is_waiting)
                 };
                 if matches {
-                    waiting_stops.push((workspace_idx, pane_idx, tab_idx));
-                    waiting_targets.push(DesktopNotificationTarget {
+                    agent_stops.push((workspace_idx, pane_idx, tab_idx));
+                    agent_targets.push(DesktopNotificationTarget {
                         workspace_id: workspace_id.clone(),
                         pane_id: Some(pane_id),
                         tab_id: Some(tab_id),
@@ -467,9 +467,9 @@ fn cycle_terminals(state: &State, forward: bool, group: Option<&str>, working: b
             });
         }
     }
-    if working || !waiting_stops.is_empty() {
-        stops = waiting_stops;
-        targets = waiting_targets;
+    if working || !agent_stops.is_empty() {
+        stops = agent_stops;
+        targets = agent_targets;
     }
     if let Some(index) = next_unread_stop(&stops, current, forward) {
         activate_desktop_notification_target(state, &targets[index], None);
