@@ -413,6 +413,8 @@ its hooks when a session starts, so restart running sessions afterwards.
   working. The pill shows only waiting and unread.
 - A group header shows `↻ N` working and `◆ N` waiting terminals, also when the
   group is collapsed. Clicking `◆ N` goes to the group's next waiting terminal.
+  While nothing in the group waits, `● N` counts its unread projects, so a reply
+  that finished in a collapsed group still shows; clicking it goes there.
 - A collapsed group keeps up to three waiting projects visible below its
   header, the selected project not counted, then a **N more waiting** row that
   goes to the next one.

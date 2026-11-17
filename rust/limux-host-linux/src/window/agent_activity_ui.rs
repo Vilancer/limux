@@ -178,7 +178,7 @@ pub(super) fn refresh_activity(state: &State) {
         .map(|workspace| workspace.id.clone())
         .collect();
     for id in &ids {
-        sync_workspace_unread(state, id);
+        paint_workspace_unread(state, id);
     }
     sidebar_groups::sync_row_visibility(state);
 }

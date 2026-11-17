@@ -364,8 +364,8 @@ pub(super) fn cycle_unread_terminal(state: &State, forward: bool) {
     cycle_attention_terminal(state, forward, None);
 }
 
-/// As `cycle_unread_terminal`; with `group`, only the waiting terminals of
-/// that group's projects (the group header's waiting button).
+/// As `cycle_unread_terminal`; with `group`, only that group's projects
+/// (the group header's waiting and unread buttons).
 pub(super) fn cycle_attention_terminal(state: &State, forward: bool, group: Option<&str>) {
     let members = group.map(|group| {
         state
@@ -456,7 +456,7 @@ pub(super) fn cycle_attention_terminal(state: &State, forward: bool, group: Opti
             });
         }
     }
-    if !waiting_stops.is_empty() || group.is_some() {
+    if !waiting_stops.is_empty() {
         stops = waiting_stops;
         targets = waiting_targets;
     }
@@ -529,7 +529,14 @@ pub(super) fn set_workspace_unread_visual(
     }
 }
 
+/// Repaint a project's unread and activity signs and its group header.
 pub(super) fn sync_workspace_unread(state: &State, ws_id: &str) {
+    paint_workspace_unread(state, ws_id);
+    sidebar_groups::sync_group_headers(state);
+}
+
+/// Repaint a project's unread and activity signs only.
+pub(super) fn paint_workspace_unread(state: &State, ws_id: &str) {
     let workspace_unread = {
         let s = state.borrow();
         let Some(workspace) = s.workspaces.iter().find(|workspace| workspace.id == ws_id) else {

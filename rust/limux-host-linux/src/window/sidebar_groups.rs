@@ -3,7 +3,7 @@
 //! list. The order and its rules live in `workspace_group`.
 
 use super::*;
-use crate::agent_activity::{ActivityCounts, GLYPH_WAITING, GLYPH_WORKING};
+use crate::agent_activity::{ActivityCounts, GLYPH_UNREAD, GLYPH_WAITING, GLYPH_WORKING};
 use crate::control_bridge::GroupRequest;
 use crate::workspace_group::{
     GroupError, SidebarRow, WaitingPreviews, WorkspaceGroup, WAITING_PREVIEW_CAP,
@@ -27,6 +27,8 @@ pub(super) struct GroupHeader {
     working_label: gtk::Label,
     /// "◆ N": waiting terminals; a click goes to the next one.
     waiting_button: gtk::Button,
+    /// "● N": unread projects, when none waits; a click goes to the next one.
+    unread_button: gtk::Button,
     /// Below a collapsed group: "N more waiting", past the preview cap.
     more_row: gtk::ListBoxRow,
     more_button: gtk::Button,
@@ -137,8 +139,24 @@ fn build_group_header(state: &State, group_id: &str) -> GroupHeader {
     header_box.append(&chevron);
     header_box.append(&pill);
     header_box.append(&count_label);
+    let unread_button = gtk::Button::new();
+    unread_button.add_css_class("flat");
+    unread_button.add_css_class("limux-ws-group-waiting");
+    unread_button.add_css_class("limux-notify-dot");
+    unread_button.set_focus_on_click(false);
+    unread_button.set_valign(gtk::Align::Center);
+    unread_button.set_visible(false);
+    {
+        let state = state.clone();
+        let group_id = group_id.to_string();
+        unread_button.connect_clicked(move |_| {
+            cycle_attention_terminal(&state, true, Some(&group_id));
+        });
+    }
+
     header_box.append(&working_label);
     header_box.append(&waiting_button);
+    header_box.append(&unread_button);
 
     let more_button = gtk::Button::new();
     more_button.add_css_class("flat");
@@ -171,6 +189,7 @@ fn build_group_header(state: &State, group_id: &str) -> GroupHeader {
         count_label,
         working_label,
         waiting_button,
+        unread_button,
         more_row,
         more_button,
     }
@@ -182,6 +201,7 @@ fn update_group_activity(
     header: &GroupHeader,
     group: &WorkspaceGroup,
     counts: ActivityCounts,
+    unread_projects: usize,
     hidden_waiting: usize,
 ) {
     header
@@ -207,6 +227,23 @@ fn update_group_activity(
     header
         .waiting_button
         .update_property(&[gtk::accessible::Property::Label(&waiting_tip)]);
+
+    // Unread is secondary: shown only while nothing in the group waits.
+    header
+        .unread_button
+        .set_label(&format!("{GLYPH_UNREAD} {unread_projects}"));
+    header
+        .unread_button
+        .set_visible(counts.waiting == 0 && unread_projects > 0);
+    let unread_tip = format!(
+        "{}: {unread_projects} unread project{}. Go to the next one",
+        group.name,
+        if unread_projects == 1 { "" } else { "s" }
+    );
+    header.unread_button.set_tooltip_text(Some(&unread_tip));
+    header
+        .unread_button
+        .update_property(&[gtk::accessible::Property::Label(&unread_tip)]);
 
     header
         .more_button
@@ -238,6 +275,8 @@ fn update_group_activity(
 struct GroupActivity {
     previews: WaitingPreviews,
     by_group: HashMap<String, ActivityCounts>,
+    /// Group id → members with unread marks.
+    unread_by_group: HashMap<String, usize>,
 }
 
 fn group_activity(s: &AppState) -> GroupActivity {
@@ -274,7 +313,33 @@ fn group_activity(s: &AppState) -> GroupActivity {
             (group.id.clone(), counts)
         })
         .collect();
-    GroupActivity { previews, by_group }
+    let unread: HashSet<&str> = s
+        .workspaces
+        .iter()
+        .filter(|workspace| {
+            workspace.unread
+                || workspace.manual_unread
+                || pane::workspace_has_unread_tabs(&workspace.id)
+        })
+        .map(|workspace| workspace.id.as_str())
+        .collect();
+    let unread_by_group = s
+        .sidebar
+        .groups()
+        .map(|group| {
+            let count = group
+                .members()
+                .iter()
+                .filter(|member| unread.contains(member.as_str()))
+                .count();
+            (group.id.clone(), count)
+        })
+        .collect();
+    GroupActivity {
+        previews,
+        by_group,
+        unread_by_group,
+    }
 }
 
 /// The "N more waiting" row: go to the first waiting project the collapsed
@@ -398,6 +463,11 @@ pub(super) fn sync_sidebar(state: &State) {
                 group,
                 activity
                     .by_group
+                    .get(&group.id)
+                    .copied()
+                    .unwrap_or_default(),
+                activity
+                    .unread_by_group
                     .get(&group.id)
                     .copied()
                     .unwrap_or_default(),
@@ -538,6 +608,11 @@ pub(super) fn sync_row_visibility(state: &State) {
                                 .get(&group.id)
                                 .copied()
                                 .unwrap_or_default(),
+                            activity
+                                .unread_by_group
+                                .get(&group.id)
+                                .copied()
+                                .unwrap_or_default(),
                             hidden,
                         );
                         rows.push((header.more_row.clone(), group.collapsed && hidden > 0));
@@ -548,6 +623,31 @@ pub(super) fn sync_row_visibility(state: &State) {
         rows
     };
     set_rows_visible(&rows);
+}
+
+/// Refresh the groups' working, waiting and unread counts on their headers.
+pub(super) fn sync_group_headers(state: &State) {
+    let s = state.borrow();
+    let activity = group_activity(&s);
+    for group in s.sidebar.groups() {
+        if let Some(header) = s.group_headers.get(&group.id) {
+            update_group_activity(
+                header,
+                group,
+                activity
+                    .by_group
+                    .get(&group.id)
+                    .copied()
+                    .unwrap_or_default(),
+                activity
+                    .unread_by_group
+                    .get(&group.id)
+                    .copied()
+                    .unwrap_or_default(),
+                activity.previews.more.get(&group.id).map_or(0, Vec::len),
+            );
+        }
+    }
 }
 
 /// Call without holding the state: hiding the row that holds the focus runs
