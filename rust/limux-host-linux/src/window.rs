@@ -6736,16 +6736,21 @@ fn handle_control_command(state: &State, command: ControlCommand) {
             phase,
             session_id,
             at_ms,
+            detail,
             reply,
         } => {
             let _ = reply.send(agent_activity_ui::handle_agent_activity(
                 state,
                 &target,
                 &surface_hint,
-                agent,
-                phase,
-                session_id,
-                at_ms,
+                crate::agent_activity::AgentEvent {
+                    tab_id: String::new(),
+                    agent,
+                    phase,
+                    session_id,
+                    at_ms,
+                    detail,
+                },
             ));
         }
         ControlCommand::CreateNotification {

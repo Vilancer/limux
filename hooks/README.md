@@ -49,6 +49,11 @@ working and waiting terminals:
 | `Notification` with `idle_prompt` | idle |
 | `SessionEnd` | ended |
 
+Each report also carries one line of what the agent is doing, shown under its
+terminal in the sidebar: the first line of the prompt, the tool it just ran
+(`Bash: cargo test`, `Edit: window.rs`), or the notification message. It stays
+on your machine; the hook only sends it to the local Limux socket.
+
 `PostToolUse` is new: it tells Limux that a tool ran after you approved it.
 Hooks installed by an older Limux lack it, so a request you approved keeps
 showing as waiting until Claude's turn ends. Run `limux hooks setup claude`

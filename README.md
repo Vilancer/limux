@@ -433,7 +433,10 @@ its hooks when a session starts, so restart running sessions afterwards.
   first, each with its project, terminal and latest message. Picking one
   focuses that terminal without expanding its group. **Mark all read** clears
   unread marks only; a waiting terminal stays until the agent continues.
-- The `▸` on a project row lists its terminals, split panes in order with a line
+- A project's active terminals (working, waiting or unread) show under its row
+  as small tabs, with what each one does or asks on a second line: the tool it
+  just ran (`Bash: cargo test`), the prompt it got, its question, or its last
+  message. The `▸` shows every terminal, split panes in order with a line
   between panes; background tabs are dimmed. Hovering a terminal outlines its
   pane, and clicking it focuses that exact tab.
 - Looking at a waiting terminal does not clear it; only the agent continuing

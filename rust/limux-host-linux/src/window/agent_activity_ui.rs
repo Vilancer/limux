@@ -32,6 +32,10 @@ pub(super) struct SessionRowView {
     glyph: &'static str,
     state_label: &'static str,
     agent: Option<String>,
+    /// What it does or asks, or its last message, in one line.
+    detail: Option<String>,
+    /// Working, waiting or unread: shown even while the list is closed.
+    active: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -125,10 +129,7 @@ pub(super) fn handle_agent_activity(
     state: &State,
     target: &WorkspaceTarget,
     surface_hint: &str,
-    agent: String,
-    phase: Option<AgentPhase>,
-    session_id: Option<String>,
-    at_ms: u64,
+    event: AgentEvent,
 ) -> Result<serde_json::Value, BridgeError> {
     let preferred = workspace_index_for_target(&state.borrow(), target)
         .or_else(|| (!state.borrow().workspaces.is_empty()).then_some(0))
@@ -144,10 +145,7 @@ pub(super) fn handle_agent_activity(
     }
     let changed = state.borrow_mut().agent_activity.apply(AgentEvent {
         tab_id: tab_id.clone(),
-        agent,
-        phase,
-        session_id,
-        at_ms,
+        ..event
     });
     if changed {
         refresh_activity(state);
@@ -192,8 +190,15 @@ pub(super) fn install_activity_timer(state: &State) {
         if prune_activity(&state) {
             refresh_activity(&state);
         } else {
-            let expanded: Vec<String> = state.borrow().expanded_sessions.iter().cloned().collect();
-            for id in expanded {
+            // Titles change and tabs open and close: keep every session list
+            // current (each rebuilds only when its rows changed).
+            let ids: Vec<String> = state
+                .borrow()
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.id.clone())
+                .collect();
+            for id in ids {
                 refresh_session_rows(&state, &id, false);
             }
         }
@@ -246,7 +251,9 @@ fn agent_label(agent: &str) -> String {
     }
 }
 
-fn session_row_views(s: &AppState, root: &gtk::Widget) -> Vec<SessionRowView> {
+/// The rows of a project's session list: every terminal with `all`, else
+/// only the active ones (working, waiting or unread).
+fn session_row_views(s: &AppState, root: &gtk::Widget, all: bool) -> Vec<SessionRowView> {
     let mut panes = Vec::new();
     collect_leaf_panes(root, &mut panes);
     let mut views = Vec::new();
@@ -266,15 +273,36 @@ fn session_row_views(s: &AppState, root: &gtk::Widget) -> Vec<SessionRowView> {
             } else {
                 agent_activity::session_glyph(activity.map(|a| a.phase), tab.unread)
             };
+            let phase = activity.map(|activity| activity.phase);
+            let waiting = phase.is_some_and(AgentPhase::is_waiting);
+            let working = phase == Some(AgentPhase::Working);
+            let active = !tab.exited && (waiting || working || tab.unread);
+            if !all && !active {
+                continue;
+            }
+            let note = s.tab_notes.get(&tab.tab_id).map(|(text, _)| text.clone());
+            let detail = if tab.exited {
+                None
+            } else if waiting || working {
+                activity
+                    .and_then(|activity| activity.detail.clone())
+                    .or(note)
+            } else if tab.unread {
+                note
+            } else {
+                None
+            };
             views.push(SessionRowView {
                 pane_id,
                 tab_id: tab.tab_id,
                 title: tab.title,
-                pane_start: pane_index > 0 && index == 0,
+                pane_start: all && pane_index > 0 && index == 0,
                 background: !tab.active,
                 glyph,
                 state_label,
                 agent: activity.map(|activity| agent_label(&activity.agent)),
+                detail,
+                active,
             });
         }
         pane_index += 1;
@@ -342,26 +370,28 @@ pub(super) fn refresh_session_rows(state: &State, workspace_id: &str, force: boo
         )
     };
     let (chevron, tip) = if expanded {
-        ("\u{25BE}", "Hide terminals")
+        ("\u{25BE}", "Show only active terminals")
     } else {
-        ("\u{25B8}", "Show terminals")
+        ("\u{25B8}", "Show all terminals")
     };
     toggle.set_label(chevron);
     toggle.set_tooltip_text(Some(tip));
     toggle.update_property(&[gtk::accessible::Property::Label(tip)]);
     toggle.update_state(&[gtk::accessible::State::Expanded(Some(expanded))]);
 
-    if !expanded {
+    // Closed, the list still shows the active terminals, so a working or
+    // waiting tab is visible under its project without opening anything.
+    let views = session_row_views(&state.borrow(), &root, expanded);
+    if !force && old.as_ref() == Some(&views) {
+        return;
+    }
+    if !expanded && views.is_empty() {
         container.set_visible(false);
         if let Some(old) = old {
             clear_outlines(&old);
             state.borrow_mut().session_views.remove(workspace_id);
             clear_children(&container);
         }
-        return;
-    }
-    let views = session_row_views(&state.borrow(), &root);
-    if !force && old.as_ref() == Some(&views) {
         return;
     }
     if let Some(old) = &old {
@@ -431,8 +461,20 @@ fn build_session_row(state: &State, workspace_id: &str, view: &SessionRowView) -
     }
     content.append(&glyph);
 
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    body.append(&content);
+    if let Some(detail) = &view.detail {
+        let line = gtk::Label::new(Some(detail));
+        line.set_xalign(0.0);
+        line.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        line.add_css_class("limux-session-detail");
+        if view.state_label == "needs approval" || view.state_label == "needs input" {
+            line.add_css_class("limux-session-waiting");
+        }
+        body.append(&line);
+    }
     let button = gtk::Button::builder()
-        .child(&content)
+        .child(&body)
         .focus_on_click(false)
         .build();
     button.add_css_class("flat");
@@ -442,10 +484,13 @@ fn build_session_row(state: &State, workspace_id: &str, view: &SessionRowView) -
     } else {
         button.add_css_class("limux-session-row-shown");
     }
-    let spoken = match &view.agent {
+    let mut spoken = match &view.agent {
         Some(agent) => format!("{}, {agent}, {}", view.title, view.state_label),
         None => format!("{}, {}", view.title, view.state_label),
     };
+    if let Some(detail) = &view.detail {
+        spoken = format!("{spoken}: {detail}");
+    }
     button.set_tooltip_text(Some(&spoken));
     button.update_property(&[gtk::accessible::Property::Label(&spoken)]);
 
@@ -535,6 +580,11 @@ pub(super) fn agent_activity_css() -> &'static str {
 }
 .limux-session-title {
     font-size: 12px;
+}
+.limux-session-detail {
+    font-size: 11px;
+    margin-left: 18px;
+    color: alpha(@window_fg_color, 0.6);
 }
 .limux-session-agent {
     font-size: 10px;

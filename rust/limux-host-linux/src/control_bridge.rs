@@ -331,6 +331,7 @@ pub enum ControlCommand {
         phase: Option<crate::agent_activity::AgentPhase>,
         session_id: Option<String>,
         at_ms: u64,
+        detail: Option<String>,
         reply: mpsc::Sender<BridgeResult>,
     },
 }
@@ -1743,6 +1744,7 @@ fn handle_method(
                         .get("at_ms")
                         .and_then(Value::as_u64)
                         .unwrap_or_default(),
+                    detail: optional_string(params, &["detail"]),
                     reply,
                 },
                 rx,
@@ -2833,8 +2835,10 @@ mod tests {
                     phase,
                     session_id,
                     at_ms,
+                    detail,
                     reply,
                 } => {
+                    assert_eq!(detail, None);
                     assert_eq!(target, WorkspaceTarget::Name("codex".to_string()));
                     assert_eq!(surface_hint, "tab-1");
                     assert_eq!(agent, "claude");

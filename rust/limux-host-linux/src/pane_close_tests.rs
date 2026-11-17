@@ -1286,10 +1286,14 @@ fn pending_panel_works_with_both_bars_hidden() {
         &state,
         &WorkspaceTarget::Active,
         &waiting.tab_id,
-        "claude".to_string(),
-        Some(crate::agent_activity::AgentPhase::NeedsApproval),
-        None,
-        1,
+        crate::agent_activity::AgentEvent {
+            tab_id: String::new(),
+            agent: "claude".to_string(),
+            phase: Some(crate::agent_activity::AgentPhase::NeedsApproval),
+            session_id: None,
+            at_ms: 1,
+            detail: Some("Bash: cargo test".to_string()),
+        },
     )
     .unwrap();
     mark_workspace_unread_with_message(
@@ -1388,10 +1392,14 @@ fn session_rows_list_terminals_as_tabs() {
         &state,
         &WorkspaceTarget::Active,
         &first.tab_id,
-        "claude".to_string(),
-        Some(crate::agent_activity::AgentPhase::Working),
-        None,
-        1,
+        crate::agent_activity::AgentEvent {
+            tab_id: String::new(),
+            agent: "claude".to_string(),
+            phase: Some(crate::agent_activity::AgentPhase::Working),
+            session_id: None,
+            at_ms: 1,
+            detail: Some("Bash: cargo test".to_string()),
+        },
     )
     .unwrap();
 
@@ -1404,17 +1412,31 @@ fn session_rows_list_terminals_as_tabs() {
             s.sidebar_shell.clone(),
         )
     };
-    assert!(!sessions.is_visible());
+    let chips = |sessions: &gtk::Box| -> Vec<gtk::Button> {
+        widget_tree(sessions.upcast_ref())
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+            .filter(|button| button.has_css_class("limux-session-row"))
+            .collect()
+    };
+    // Closed, the list already shows the working terminal and what it does.
+    pump_for(std::time::Duration::from_millis(300));
+    assert!(sessions.is_visible(), "an active terminal shows without ▸");
+    assert_eq!(chips(&sessions).len(), 1, "only the active one");
+    let details: Vec<String> = widget_tree(sessions.upcast_ref())
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+        .filter(|label| label.has_css_class("limux-session-detail"))
+        .map(|label| label.label().to_string())
+        .collect();
+    assert_eq!(details, ["Bash: cargo test"]);
+    snapshot_widget(sidebar.upcast_ref(), "session-rows-closed");
+
     toggle.emit_clicked();
     pump_for(std::time::Duration::from_millis(300));
     assert!(sessions.is_visible());
-
-    let rows: Vec<gtk::Button> = widget_tree(sessions.upcast_ref())
-        .into_iter()
-        .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
-        .filter(|button| button.has_css_class("limux-session-row"))
-        .collect();
-    assert_eq!(rows.len(), 2, "one tab chip per terminal");
+    let rows = chips(&sessions);
+    assert_eq!(rows.len(), 2, "▸ shows every terminal");
     assert!(
         rows[1].has_css_class("limux-session-row-shown"),
         "the tab on screen is marked"

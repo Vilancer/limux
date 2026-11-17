@@ -48,6 +48,9 @@ pub struct AgentEvent {
     pub session_id: Option<String>,
     /// When the hook ran (Unix ms). Orders events that race over the socket.
     pub at_ms: u64,
+    /// What the agent does, in one line ("Bash: cargo test"); `None` keeps
+    /// the previous line while the phase stays the same.
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +59,7 @@ pub struct SurfaceActivity {
     pub phase: AgentPhase,
     pub session_id: Option<String>,
     pub at_ms: u64,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -85,14 +89,22 @@ impl ActivityStore {
                 same_session && self.surfaces.remove(&event.tab_id).is_some()
             }
             Some(phase) => {
+                let detail = event.detail.or_else(|| {
+                    current
+                        .filter(|current| current.phase == phase)
+                        .and_then(|current| current.detail.clone())
+                });
                 let next = SurfaceActivity {
                     agent: event.agent,
                     phase,
                     session_id: event.session_id,
                     at_ms: event.at_ms,
+                    detail,
                 };
                 let changed = current.is_none_or(|current| {
-                    current.phase != next.phase || current.agent != next.agent
+                    current.phase != next.phase
+                        || current.agent != next.agent
+                        || current.detail != next.detail
                 });
                 self.surfaces.insert(event.tab_id, next);
                 changed
@@ -258,6 +270,7 @@ mod tests {
             phase,
             session_id: session.map(str::to_string),
             at_ms,
+            detail: None,
         }
     }
 
@@ -297,6 +310,25 @@ mod tests {
         }
         assert!(store.apply(event("t", None, Some("s"), 6)));
         assert_eq!(store.phase("t"), None);
+    }
+
+    #[test]
+    fn the_detail_line_follows_what_the_agent_does() {
+        let mut store = ActivityStore::default();
+        let with = |phase, at, detail: Option<&str>| AgentEvent {
+            detail: detail.map(str::to_string),
+            ..event("t", Some(phase), Some("s"), at)
+        };
+        assert!(store.apply(with(AgentPhase::Working, 1, Some("fix the tabs"))));
+        assert!(store.apply(with(AgentPhase::Working, 2, Some("Bash: cargo test"))));
+        let detail = |store: &ActivityStore| store.get("t").unwrap().detail.clone();
+        assert_eq!(detail(&store).as_deref(), Some("Bash: cargo test"));
+        // No new line in the same phase keeps the last one.
+        assert!(!store.apply(with(AgentPhase::Working, 3, None)));
+        assert_eq!(detail(&store).as_deref(), Some("Bash: cargo test"));
+        // A new phase without a line drops the old one.
+        assert!(store.apply(with(AgentPhase::Idle, 4, None)));
+        assert_eq!(detail(&store), None);
     }
 
     #[test]

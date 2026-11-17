@@ -556,7 +556,7 @@ pub(super) fn paint_workspace_unread(state: &State, ws_id: &str) {
         workspace.unread || workspace.manual_unread
     };
     let tab_unread = pane::workspace_has_unread_tabs(ws_id);
-    let expanded = {
+    {
         let s = state.borrow();
         if let Some(workspace) = s.workspaces.iter().find(|workspace| workspace.id == ws_id) {
             let counts = agent_activity_ui::workspace_activity_counts(&s, ws_id);
@@ -566,11 +566,8 @@ pub(super) fn paint_workspace_unread(state: &State, ws_id: &str) {
                 counts,
             );
         }
-        s.expanded_sessions.contains(ws_id)
-    };
-    if expanded {
-        agent_activity_ui::refresh_session_rows(state, ws_id, false);
     }
+    agent_activity_ui::refresh_session_rows(state, ws_id, false);
 }
 
 pub(super) fn clear_visible_tab_unread(state: &State, ws_id: &str) {

@@ -1163,7 +1163,8 @@ async fn run_agent_hook(
     }
 
     if let Some(state) = agent_activity_state(agent, &event, &payload) {
-        report_agent_activity(client, agent, args, &payload, state).await;
+        let detail = agent_activity_detail(&event, &payload);
+        report_agent_activity(client, agent, args, &payload, state, detail).await;
     }
 
     Ok(agent_hook_output(agent, &event, &payload))
@@ -1221,6 +1222,7 @@ async fn report_agent_activity(
     args: &[String],
     payload: &Value,
     state: &str,
+    detail: Option<String>,
 ) {
     // An OSC-only hook has no socket to report to.
     if terminal_notifications::forced() {
@@ -1230,7 +1232,7 @@ async fn report_agent_activity(
     let Some(surface) = surface else {
         return;
     };
-    let params = agent_activity_params(agent, payload, state, &surface, unix_millis());
+    let params = agent_activity_params(agent, payload, state, &surface, unix_millis(), detail);
     let _ = call_in_workspace_scope(client, workspace, "agent.activity", params).await;
 }
 
@@ -1240,6 +1242,7 @@ fn agent_activity_params(
     state: &str,
     surface: &str,
     at_ms: u64,
+    detail: Option<String>,
 ) -> Value {
     let mut params = json!({
         "surface_id": surface,
@@ -1253,7 +1256,63 @@ fn agent_activity_params(
     ) {
         params["session_id"] = Value::String(session.to_owned());
     }
+    if let Some(detail) = detail {
+        params["detail"] = Value::String(detail);
+    }
     params
+}
+
+/// What the agent is doing, in one short line for the sidebar: the prompt it
+/// got, the tool it just ran ("Bash: cargo test", "Edit: window.rs"), or what
+/// it asks. `None` keeps the previous line.
+fn agent_activity_detail(event: &str, payload: &Value) -> Option<String> {
+    let text = match event {
+        "UserPromptSubmit" | "prompt-submit" => hook_str(payload, &["prompt"])?.to_owned(),
+        "PreToolUse" | "PostToolUse" | "post-tool-use" => {
+            let tool = hook_str(payload, &["tool_name"])?;
+            let input = payload.get("tool_input");
+            let field = |keys: &[&str]| input.and_then(|input| hook_str(input, keys));
+            let target = match tool {
+                "Bash" => field(&["command"]).map(str::to_owned),
+                "Edit" | "MultiEdit" | "Write" | "Read" | "NotebookEdit" => {
+                    field(&["file_path", "notebook_path"]).map(|path| {
+                        std::path::Path::new(path)
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.to_owned())
+                    })
+                }
+                "Grep" | "Glob" => field(&["pattern"]).map(str::to_owned),
+                "WebFetch" => field(&["url"]).map(str::to_owned),
+                "WebSearch" => field(&["query"]).map(str::to_owned),
+                "Task" | "Agent" => field(&["description"]).map(str::to_owned),
+                _ => None,
+            };
+            match target {
+                Some(target) => format!("{tool}: {target}"),
+                None => tool.to_owned(),
+            }
+        }
+        "Notification" | "notification" => hook_str(payload, &["message"])?.to_owned(),
+        _ => return None,
+    };
+    Some(one_line(&text, 80))
+}
+
+/// The first non-empty line of `text`, at most `max` characters.
+fn one_line(text: &str, max: usize) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.chars().count() <= max {
+        line.to_owned()
+    } else {
+        let mut cut: String = line.chars().take(max.saturating_sub(1)).collect();
+        cut.push('…');
+        cut
+    }
 }
 
 fn unix_millis() -> u64 {
@@ -5146,6 +5205,7 @@ mod cli_arg_tests {
             "idle",
             "7f0c-tab",
             42,
+            None,
         );
         assert_eq!(
             params,
@@ -5163,8 +5223,59 @@ mod cli_arg_tests {
             "working",
             "t",
             1,
+            Some("Bash: ls".to_string()),
         );
         assert!(params.get("session_id").is_none());
+        assert_eq!(params["detail"], "Bash: ls");
+    }
+
+    #[test]
+    fn agent_activity_detail_says_what_the_agent_does() {
+        let table = [
+            (
+                "prompt-submit",
+                json!({"prompt": "\n  fix the sidebar tabs\nand more"}),
+                Some("fix the sidebar tabs"),
+            ),
+            (
+                "post-tool-use",
+                json!({"tool_name": "Bash", "tool_input": {"command": "cargo test -p limux\n"}}),
+                Some("Bash: cargo test -p limux"),
+            ),
+            (
+                "post-tool-use",
+                json!({"tool_name": "Edit", "tool_input": {"file_path": "/a/b/window.rs"}}),
+                Some("Edit: window.rs"),
+            ),
+            (
+                "post-tool-use",
+                json!({"tool_name": "Grep", "tool_input": {"pattern": "fn main"}}),
+                Some("Grep: fn main"),
+            ),
+            (
+                "post-tool-use",
+                json!({"tool_name": "TodoWrite"}),
+                Some("TodoWrite"),
+            ),
+            (
+                "notification",
+                json!({"message": "Claude needs your permission to use Bash"}),
+                Some("Claude needs your permission to use Bash"),
+            ),
+            ("stop", json!({"message": "done"}), None),
+            ("post-tool-use", json!({}), None),
+        ];
+        for (event, payload, detail) in table {
+            assert_eq!(
+                agent_activity_detail(event, &payload).as_deref(),
+                detail,
+                "{event} {payload}"
+            );
+        }
+        let long = "x".repeat(200);
+        let detail = agent_activity_detail("prompt-submit", &json!({ "prompt": long })).unwrap();
+        assert_eq!(detail.chars().count(), 80);
+        assert!(detail.ends_with('…'));
     }
 
     #[test]
