@@ -1,3 +1,4 @@
+mod agent_activity;
 mod app_config;
 mod browser_link;
 mod browser_sandbox;

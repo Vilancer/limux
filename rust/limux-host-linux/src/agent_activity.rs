@@ -1,0 +1,375 @@
+//! Live agent state per terminal, reported by agent hooks through the
+//! `agent.activity` control method, and the summaries the sidebar draws
+//! from it. Pure: no GTK, so the rules are table-tested.
+//!
+//! The state is kept per terminal tab (its tab id), separate from unread and
+//! from recent PTY output. Unread stays where it was (tab and workspace
+//! flags); "response ready" is the unread mark the Stop notification already
+//! sets. Viewing a terminal never changes this state: only a hook does.
+
+use std::collections::HashMap;
+
+/// What an agent in a terminal is doing, as its hooks last said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentPhase {
+    /// A turn is running (prompt submitted, or a tool ran).
+    Working,
+    /// The agent asked for permission to use a tool.
+    NeedsApproval,
+    /// The agent asked a question (an input dialog).
+    NeedsInput,
+    /// The agent is waiting for the next prompt.
+    Idle,
+}
+
+impl AgentPhase {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "working" => Some(Self::Working),
+            "needs_approval" => Some(Self::NeedsApproval),
+            "needs_input" => Some(Self::NeedsInput),
+            "idle" => Some(Self::Idle),
+            _ => None,
+        }
+    }
+
+    pub fn is_waiting(self) -> bool {
+        matches!(self, Self::NeedsApproval | Self::NeedsInput)
+    }
+}
+
+/// One normalized hook event for a terminal tab. `phase: None` means the
+/// agent session ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentEvent {
+    pub tab_id: String,
+    pub agent: String,
+    pub phase: Option<AgentPhase>,
+    pub session_id: Option<String>,
+    /// When the hook ran (Unix ms). Orders events that race over the socket.
+    pub at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SurfaceActivity {
+    pub agent: String,
+    pub phase: AgentPhase,
+    pub session_id: Option<String>,
+    pub at_ms: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct ActivityStore {
+    surfaces: HashMap<String, SurfaceActivity>,
+}
+
+impl ActivityStore {
+    /// Apply an event; returns whether anything changed.
+    ///
+    /// - An event older than the tab's last one is dropped, so a late hook
+    ///   from an earlier turn cannot clear a newer state.
+    /// - The end of a session only clears the tab when it is that session
+    ///   (or either side does not know its session).
+    pub fn apply(&mut self, event: AgentEvent) -> bool {
+        let current = self.surfaces.get(&event.tab_id);
+        if current.is_some_and(|current| event.at_ms < current.at_ms) {
+            return false;
+        }
+        match event.phase {
+            None => {
+                let same_session =
+                    current.is_some_and(|current| match (&current.session_id, &event.session_id) {
+                        (Some(current), Some(ended)) => current == ended,
+                        _ => true,
+                    });
+                same_session && self.surfaces.remove(&event.tab_id).is_some()
+            }
+            Some(phase) => {
+                let next = SurfaceActivity {
+                    agent: event.agent,
+                    phase,
+                    session_id: event.session_id,
+                    at_ms: event.at_ms,
+                };
+                let changed = current.is_none_or(|current| {
+                    current.phase != next.phase || current.agent != next.agent
+                });
+                self.surfaces.insert(event.tab_id, next);
+                changed
+            }
+        }
+    }
+
+    pub fn get(&self, tab_id: &str) -> Option<&SurfaceActivity> {
+        self.surfaces.get(tab_id)
+    }
+
+    pub fn phase(&self, tab_id: &str) -> Option<AgentPhase> {
+        self.get(tab_id).map(|activity| activity.phase)
+    }
+
+    /// Forget tabs that no longer exist, so a closed or exited terminal
+    /// drops out of every count. Returns whether anything was removed.
+    pub fn retain_tabs(&mut self, mut live: impl FnMut(&str) -> bool) -> bool {
+        let before = self.surfaces.len();
+        self.surfaces.retain(|tab_id, _| live(tab_id));
+        self.surfaces.len() != before
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.surfaces.is_empty()
+    }
+}
+
+/// Working and waiting terminals in a project or group.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActivityCounts {
+    pub working: usize,
+    pub waiting: usize,
+}
+
+impl ActivityCounts {
+    pub fn add_phase(&mut self, phase: Option<AgentPhase>) {
+        match phase {
+            Some(AgentPhase::Working) => self.working += 1,
+            Some(phase) if phase.is_waiting() => self.waiting += 1,
+            _ => {}
+        }
+    }
+
+    pub fn add(&mut self, other: Self) {
+        self.working += other.working;
+        self.waiting += other.waiting;
+    }
+}
+
+/// The one signal a project row (and its top-bar pill) shows:
+/// waiting over unread over working.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectSignal {
+    None,
+    Working,
+    Unread,
+    Waiting,
+}
+
+impl ProjectSignal {
+    pub fn of(counts: ActivityCounts, unread: bool) -> Self {
+        if counts.waiting > 0 {
+            Self::Waiting
+        } else if unread {
+            Self::Unread
+        } else if counts.working > 0 {
+            Self::Working
+        } else {
+            Self::None
+        }
+    }
+
+    /// The pill shows "needs attention" only: waiting, else unread.
+    pub fn needs_attention(self) -> bool {
+        matches!(self, Self::Waiting | Self::Unread)
+    }
+}
+
+pub const GLYPH_WAITING: &str = "\u{25C6}"; // ◆
+pub const GLYPH_UNREAD: &str = "\u{25CF}"; // ●
+pub const GLYPH_WORKING: &str = "\u{21BB}"; // ↻ (static: the tab spinner means recent output)
+pub const GLYPH_IDLE: &str = "\u{25CB}"; // ○
+pub const GLYPH_SHELL: &str = "\u{203A}"; // ›
+
+/// Glyph and spoken label of one terminal in a session list.
+pub fn session_glyph(phase: Option<AgentPhase>, unread: bool) -> (&'static str, &'static str) {
+    match phase {
+        Some(AgentPhase::NeedsApproval) => (GLYPH_WAITING, "needs approval"),
+        Some(AgentPhase::NeedsInput) => (GLYPH_WAITING, "needs input"),
+        _ if unread => (GLYPH_UNREAD, "unread"),
+        Some(AgentPhase::Working) => (GLYPH_WORKING, "working"),
+        Some(AgentPhase::Idle) => (GLYPH_IDLE, "waiting for a prompt"),
+        None => (GLYPH_SHELL, "terminal"),
+    }
+}
+
+/// "3 working, 1 needs you" for tooltips and accessible labels.
+pub fn counts_summary(counts: ActivityCounts) -> Option<String> {
+    let mut parts = Vec::new();
+    if counts.waiting > 0 {
+        parts.push(format!(
+            "{} need{} you",
+            counts.waiting,
+            if counts.waiting == 1 { "s" } else { "" }
+        ));
+    }
+    if counts.working > 0 {
+        parts.push(format!("{} working", counts.working));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(
+        tab: &str,
+        phase: Option<AgentPhase>,
+        session: Option<&str>,
+        at_ms: u64,
+    ) -> AgentEvent {
+        AgentEvent {
+            tab_id: tab.to_string(),
+            agent: "claude".to_string(),
+            phase,
+            session_id: session.map(str::to_string),
+            at_ms,
+        }
+    }
+
+    #[test]
+    fn phases_parse_from_the_wire_names() {
+        for (wire, phase) in [
+            ("working", AgentPhase::Working),
+            ("needs_approval", AgentPhase::NeedsApproval),
+            ("needs_input", AgentPhase::NeedsInput),
+            ("idle", AgentPhase::Idle),
+        ] {
+            assert_eq!(AgentPhase::parse(wire), Some(phase));
+        }
+        assert_eq!(AgentPhase::parse("ended"), None);
+        assert_eq!(AgentPhase::parse("Working"), None);
+    }
+
+    #[test]
+    fn a_turn_runs_waits_resumes_and_ends() {
+        use AgentPhase::*;
+        let mut store = ActivityStore::default();
+        let steps = [
+            (Some(Idle), 1, true),           // session start
+            (Some(Working), 2, true),        // prompt submitted
+            (Some(NeedsApproval), 3, true),  // permission prompt
+            (Some(NeedsApproval), 3, false), // the same hook twice
+            (Some(Working), 4, true),        // tool ran after approval
+            (Some(Idle), 5, true),           // stop: response ready
+        ];
+        for (phase, at, changed) in steps {
+            assert_eq!(
+                store.apply(event("t", phase, Some("s"), at)),
+                changed,
+                "{phase:?}@{at}"
+            );
+            assert_eq!(store.phase("t"), phase);
+        }
+        assert!(store.apply(event("t", None, Some("s"), 6)));
+        assert_eq!(store.phase("t"), None);
+    }
+
+    #[test]
+    fn a_late_event_never_overwrites_a_newer_one() {
+        let mut store = ActivityStore::default();
+        store.apply(event("t", Some(AgentPhase::Working), Some("s"), 20));
+        // The stop of the previous turn arrives after the new prompt.
+        assert!(!store.apply(event("t", Some(AgentPhase::Idle), Some("s"), 10)));
+        assert!(!store.apply(event("t", None, Some("s"), 10)));
+        assert_eq!(store.phase("t"), Some(AgentPhase::Working));
+    }
+
+    #[test]
+    fn the_end_of_another_session_does_not_clear_the_tab() {
+        let mut store = ActivityStore::default();
+        store.apply(event("t", Some(AgentPhase::Working), Some("new"), 5));
+        assert!(!store.apply(event("t", None, Some("old"), 6)));
+        assert_eq!(store.phase("t"), Some(AgentPhase::Working));
+        // Unknown on either side: the end applies.
+        assert!(store.apply(event("t", None, None, 7)));
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn closed_tabs_drop_out() {
+        let mut store = ActivityStore::default();
+        store.apply(event("a", Some(AgentPhase::Working), None, 1));
+        store.apply(event("b", Some(AgentPhase::NeedsInput), None, 1));
+        assert!(store.retain_tabs(|tab| tab == "b"));
+        assert_eq!(store.phase("a"), None);
+        assert_eq!(store.phase("b"), Some(AgentPhase::NeedsInput));
+        assert!(!store.retain_tabs(|tab| tab == "b"));
+    }
+
+    #[test]
+    fn project_signal_prefers_waiting_then_unread_then_working() {
+        let counts = |working, waiting| ActivityCounts { working, waiting };
+        let table = [
+            (counts(0, 0), false, ProjectSignal::None),
+            (counts(2, 0), false, ProjectSignal::Working),
+            (counts(2, 0), true, ProjectSignal::Unread),
+            (counts(0, 0), true, ProjectSignal::Unread),
+            (counts(1, 1), true, ProjectSignal::Waiting),
+            (counts(0, 3), false, ProjectSignal::Waiting),
+        ];
+        for (counts, unread, signal) in table {
+            assert_eq!(
+                ProjectSignal::of(counts, unread),
+                signal,
+                "{counts:?} {unread}"
+            );
+        }
+        assert!(ProjectSignal::Waiting.needs_attention());
+        assert!(ProjectSignal::Unread.needs_attention());
+        assert!(!ProjectSignal::Working.needs_attention());
+    }
+
+    #[test]
+    fn counts_add_up_and_read_out() {
+        let mut counts = ActivityCounts::default();
+        for phase in [
+            Some(AgentPhase::Working),
+            Some(AgentPhase::Working),
+            Some(AgentPhase::NeedsApproval),
+            Some(AgentPhase::Idle),
+            None,
+        ] {
+            counts.add_phase(phase);
+        }
+        assert_eq!(
+            counts,
+            ActivityCounts {
+                working: 2,
+                waiting: 1
+            }
+        );
+        assert_eq!(
+            counts_summary(counts).as_deref(),
+            Some("1 needs you, 2 working")
+        );
+        assert_eq!(counts_summary(ActivityCounts::default()), None);
+        assert_eq!(
+            counts_summary(ActivityCounts {
+                working: 0,
+                waiting: 2
+            })
+            .as_deref(),
+            Some("2 need you")
+        );
+    }
+
+    #[test]
+    fn session_glyphs_put_waiting_over_unread_over_working() {
+        assert_eq!(
+            session_glyph(Some(AgentPhase::NeedsApproval), true).0,
+            GLYPH_WAITING
+        );
+        assert_eq!(
+            session_glyph(Some(AgentPhase::Working), true).0,
+            GLYPH_UNREAD
+        );
+        assert_eq!(
+            session_glyph(Some(AgentPhase::Working), false).0,
+            GLYPH_WORKING
+        );
+        assert_eq!(session_glyph(None, false).0, GLYPH_SHELL);
+        assert_eq!(
+            session_glyph(Some(AgentPhase::Idle), false).1,
+            "waiting for a prompt"
+        );
+    }
+}

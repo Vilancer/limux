@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -30,6 +30,7 @@ use crate::split_tree::{self, SplitTreeContainer};
 use crate::workspace_color::{self, WorkspaceColor};
 use crate::workspace_group::{Placement, RowRef, SidebarLayout};
 
+mod agent_activity_ui;
 mod gui_hooks;
 mod navigation_notifications;
 mod session_persistence;
@@ -81,6 +82,10 @@ struct Workspace {
     indicator_button: gtk::Button,
     /// The unread dot inside the indicator pill.
     indicator_unread_dot: gtk::Label,
+    /// Chevron that opens the project's session list.
+    sessions_toggle: gtk::Button,
+    /// The project's session rows, one per terminal.
+    sessions_box: gtk::Box,
 }
 
 #[derive(Clone)]
@@ -144,6 +149,14 @@ pub(crate) struct AppState {
     workspace_dragging: Option<String>,
     group_dragging: Option<String>,
     desktop_notification_routes: HashMap<u32, DesktopNotificationRoute>,
+    /// Live agent state per terminal tab, from `agent.activity`.
+    agent_activity: crate::agent_activity::ActivityStore,
+    /// Projects whose session list is open.
+    expanded_sessions: HashSet<String>,
+    /// Session rows as last drawn, per project, to skip unchanged rebuilds.
+    session_views: HashMap<String, Vec<agent_activity_ui::SessionRowView>>,
+    /// Bumped on every project switch; a pending unread clear checks it.
+    unread_dwell_epoch: u64,
     _theme_portal_signal: Option<gio::SignalSubscription>,
     _theme_gnome_settings: Option<gio::Settings>,
     _theme_gnome_signal: Option<glib::SignalHandlerId>,
@@ -1727,7 +1740,7 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
         ""
     };
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         build_window_css(background_opacity),
         pane::PANE_CSS,
         crate::terminal::CLIPBOARD_TOAST_CSS,
@@ -1737,6 +1750,7 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
         ssd_css,
         workspace_color::workspace_color_css(),
         sidebar_groups::workspace_group_css(),
+        agent_activity_ui::agent_activity_css(),
     )
 }
 
@@ -2109,6 +2123,10 @@ pub fn build_window(app: &adw::Application) {
         workspace_dragging: None,
         group_dragging: None,
         desktop_notification_routes: HashMap::new(),
+        agent_activity: Default::default(),
+        expanded_sessions: HashSet::new(),
+        session_views: HashMap::new(),
+        unread_dwell_epoch: 0,
         _theme_portal_signal: None,
         _theme_gnome_settings: None,
         _theme_gnome_signal: None,
@@ -2282,6 +2300,8 @@ pub fn build_window(app: &adw::Application) {
             }
         });
     }
+
+    agent_activity_ui::install_activity_timer(&state);
 
     {
         let state = state.clone();
@@ -5132,6 +5152,8 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
         app_state.sidebar_list.append(&row);
         app_state.indicator_box.append(&indicator_button);
         install_workspace_row_interactions(state, &new_workspace_id, &row, &favorite_button);
+        let (sessions_toggle, sessions_box) =
+            agent_activity_ui::attach_session_list(state, &new_workspace_id, &row);
 
         app_state.workspaces.push(Workspace {
             id: new_workspace_id.clone(),
@@ -5152,6 +5174,8 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
             path_label,
             indicator_button,
             indicator_unread_dot,
+            sessions_toggle,
+            sessions_box,
         });
         app_state
             .sidebar
@@ -5839,6 +5863,8 @@ fn break_tabs_into_new_workspace(
         app_state.sidebar_list.append(&row);
         app_state.indicator_box.append(&indicator_button);
         install_workspace_row_interactions(state, &new_workspace_id, &row, &favorite_button);
+        let (sessions_toggle, sessions_box) =
+            agent_activity_ui::attach_session_list(state, &new_workspace_id, &row);
 
         if let Some(prev_id) = app_state
             .workspaces
@@ -5867,6 +5893,8 @@ fn break_tabs_into_new_workspace(
             path_label,
             indicator_button,
             indicator_unread_dot,
+            sessions_toggle,
+            sessions_box,
         });
         app_state
             .sidebar
@@ -6662,6 +6690,25 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 map.insert("ok".to_string(), serde_json::Value::Bool(true));
             }
             let _ = reply.send(Ok(payload));
+        }
+        ControlCommand::AgentActivity {
+            target,
+            surface_hint,
+            agent,
+            phase,
+            session_id,
+            at_ms,
+            reply,
+        } => {
+            let _ = reply.send(agent_activity_ui::handle_agent_activity(
+                state,
+                &target,
+                &surface_hint,
+                agent,
+                phase,
+                session_id,
+                at_ms,
+            ));
         }
         ControlCommand::CreateNotification {
             target,
@@ -7509,6 +7556,7 @@ fn add_workspace_with_initial_command(
         );
     sidebar_list.append(&row);
     install_workspace_row_interactions(state, &id, &row, &favorite_button);
+    let (sessions_toggle, sessions_box) = agent_activity_ui::attach_session_list(state, &id, &row);
     // Wire close button
     {
         let state = state.clone();
@@ -7562,6 +7610,8 @@ fn add_workspace_with_initial_command(
         path_label,
         indicator_button,
         indicator_unread_dot,
+        sessions_toggle,
+        sessions_box,
     };
 
     if workspace.favorite {
@@ -8071,8 +8121,10 @@ fn switch_workspace_with_focus(state: &State, idx: usize, focus_entrypoint: bool
     };
 
     stack.set_visible_child_name(&stack_name);
-    clear_visible_tab_unread(state, &workspace_id);
-    // A collapsed group shows only its active member.
+    // Unread clears after the project stayed on screen for a moment, so
+    // passing through projects keeps their marks.
+    agent_activity_ui::schedule_unread_clear(state, &workspace_id);
+    // A collapsed group shows only its active member (and waiting ones).
     sidebar_groups::sync_row_visibility(state);
     if focus_entrypoint {
         glib::idle_add_local_once(move || {
