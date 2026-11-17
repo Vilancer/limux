@@ -1092,3 +1092,186 @@ fn next_unread_terminal_reaches_a_hidden_tab() {
     let window = state.borrow().window.clone();
     window.close();
 }
+
+fn pending_test_window(app_id: &str) -> (State, tempfile::TempDir) {
+    let temp = tempfile::tempdir().unwrap();
+    for key in ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"] {
+        let path = temp.path().join(key);
+        std::fs::create_dir_all(&path).unwrap();
+        std::env::set_var(key, path);
+    }
+    let ghostty_config = temp.path().join("XDG_CONFIG_HOME/ghostty");
+    std::fs::create_dir_all(&ghostty_config).unwrap();
+    std::fs::write(
+        ghostty_config.join("config"),
+        "command = /bin/sh\nshell-integration = none\n",
+    )
+    .unwrap();
+    let socket = temp.path().join("limux.sock");
+    std::env::set_var("LIMUX_SOCKET", &socket);
+    std::env::set_var("LIMUX_SOCKET_PATH", &socket);
+
+    crate::prepare_ghostty_runtime();
+    adw::init().unwrap();
+    crate::terminal::init_ghostty();
+    let app = adw::Application::builder().application_id(app_id).build();
+    app.register(None::<&gio::Cancellable>).unwrap();
+    build_window(&app);
+    let state = CONTROL_STATE.with(|slot| slot.borrow().as_ref().unwrap().clone());
+    (state, temp)
+}
+
+fn pending_counter(state: &State) -> gtk::Button {
+    state.borrow().top_bar_pending_btn.clone().unwrap()
+}
+
+// A finished terminal in a background tab shows in the counter and the pending
+// panel; picking it focuses that exact tab, and viewing it reads it.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn pending_panel_lists_a_finished_terminal_and_jumps_to_it() {
+    let (state, _temp) = pending_test_window("dev.limux.PendingPanelTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    pane::add_terminal_tab_to_pane(&pane);
+    let finished = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    activate_workspace_shortcut(&state, 0);
+    pump_for(std::time::Duration::from_millis(1500));
+    assert!(!pending_counter(&state).is_visible(), "nothing pending yet");
+
+    mark_workspace_unread_with_message(
+        &state,
+        &ws_id,
+        "Claude finished: tests pass",
+        false,
+        DesktopNotificationTarget {
+            workspace_id: ws_id.clone(),
+            pane_id: Some(finished.pane_id),
+            tab_id: Some(finished.tab_id.clone()),
+        },
+    );
+    let counter = pending_counter(&state);
+    assert!(counter.is_visible());
+    assert_eq!(counter.label().as_deref(), Some("\u{25CF} 1"));
+
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_until(wait, || pending_panel::open_entry_count(&state).is_some());
+    assert_eq!(pending_panel::open_entry_count(&state), Some(1));
+
+    pending_panel::activate_entry(&state, 0);
+    pump_until(wait, || {
+        pane::active_tab_in_pane(&pane).as_deref() == Some(finished.tab_id.as_str())
+            && focus_within(&state, &pane)
+            && pending_panel::open_entry_count(&state).is_none()
+    });
+    assert_eq!(
+        pane::active_tab_in_pane(&pane).as_deref(),
+        Some(finished.tab_id.as_str())
+    );
+    assert_focus_within("the finished tab", &state, &pane);
+    assert_eq!(
+        pending_panel::open_entry_count(&state),
+        None,
+        "the panel closed"
+    );
+    pump_until(wait, || !pane::workspace_has_unread_tabs(&ws_id));
+    assert!(
+        !pane::workspace_has_unread_tabs(&ws_id),
+        "viewing it reads it"
+    );
+    assert!(!counter.is_visible(), "nothing pending any more");
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+// With the top bar and the sidebar hidden, the counter moves next to the
+// sidebar toggle in the pane header, the panel still opens, and "Mark all
+// read" leaves a waiting terminal in place.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn pending_panel_works_with_both_bars_hidden() {
+    let (state, _temp) = pending_test_window("dev.limux.PendingPanelHiddenTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    let waiting = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    let finished = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    activate_workspace_shortcut(&state, 0);
+    pump_for(std::time::Duration::from_millis(1500));
+
+    agent_activity_ui::handle_agent_activity(
+        &state,
+        &WorkspaceTarget::Active,
+        &waiting.tab_id,
+        "claude".to_string(),
+        Some(crate::agent_activity::AgentPhase::NeedsApproval),
+        None,
+        1,
+    )
+    .unwrap();
+    mark_workspace_unread_with_message(
+        &state,
+        &ws_id,
+        "Claude finished",
+        false,
+        DesktopNotificationTarget {
+            workspace_id: ws_id.clone(),
+            pane_id: Some(finished.pane_id),
+            tab_id: Some(finished.tab_id.clone()),
+        },
+    );
+
+    // Hide both bars the way the user does.
+    toggle_top_bar(&state);
+    toggle_sidebar(&state);
+    pump_for(std::time::Duration::from_millis(800));
+    let root = state.borrow().active_workspace().unwrap().root.clone();
+    let counter = pending_counter(&state);
+    assert!(!state.borrow().top_bar.as_ref().unwrap().is_visible());
+    assert!(
+        counter.is_ancestor(&root),
+        "with both bars hidden the counter sits in the pane header"
+    );
+    assert!(counter.is_visible());
+    assert_eq!(
+        counter.label().as_deref(),
+        Some("\u{25C6} 1"),
+        "waiting wins"
+    );
+
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_until(wait, || pending_panel::open_entry_count(&state).is_some());
+    assert_eq!(pending_panel::open_entry_count(&state), Some(2));
+
+    // Mark all read: the finished one goes, the waiting one stays.
+    pending_panel::click_mark_all(&state);
+    pump_until(wait, || pending_panel::open_entry_count(&state) == Some(1));
+    assert_eq!(pending_panel::open_entry_count(&state), Some(1));
+    assert_eq!(counter.label().as_deref(), Some("\u{25C6} 1"));
+
+    // Ctrl+Alt+P again closes it.
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_until(wait, || pending_panel::open_entry_count(&state).is_none());
+    assert_eq!(pending_panel::open_entry_count(&state), None);
+
+    let window = state.borrow().window.clone();
+    window.close();
+}

@@ -48,6 +48,7 @@ pub enum ShortcutId {
     RecentWorkspace,
     NextUnreadTerminal,
     PrevUnreadTerminal,
+    PendingPanel,
     OpenBrowserInSplit,
     BrowserFocusLocation,
     BrowserBack,
@@ -103,6 +104,7 @@ pub enum ShortcutCommand {
     RecentWorkspace,
     NextUnreadTerminal,
     PrevUnreadTerminal,
+    PendingPanel,
     OpenBrowserInSplit,
     BrowserFocusLocation,
     BrowserBack,
@@ -319,7 +321,7 @@ struct ShortcutConfigFile {
     shortcuts: HashMap<String, serde_json::Value>,
 }
 
-const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 52] = [
+const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 53] = [
     ShortcutDefinition {
         id: ShortcutId::NewWorkspace,
         config_key: "new_workspace",
@@ -691,6 +693,17 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 52] = [
         label: "Previous Unread Terminal",
         registers_gtk_accel: false,
         command: ShortcutCommand::PrevUnreadTerminal,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::PendingPanel,
+        config_key: "pending_panel",
+        action_name: "win.pending-panel",
+        default_accel: "<Ctrl><Alt>p",
+        label: "Show Pending Terminals",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::PendingPanel,
         scope: ShortcutScope::Window,
         editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
@@ -1754,7 +1767,7 @@ mod tests {
 
     #[test]
     fn definitions_cover_current_host_shortcuts() {
-        assert_eq!(definitions().len(), 52);
+        assert_eq!(definitions().len(), 53);
     }
 
     #[test]

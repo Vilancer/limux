@@ -33,6 +33,7 @@ use crate::workspace_group::{Placement, RowRef, SidebarLayout};
 mod agent_activity_ui;
 mod gui_hooks;
 mod navigation_notifications;
+mod pending_panel;
 mod session_persistence;
 mod sidebar_groups;
 pub(crate) use navigation_notifications::find_gl_area;
@@ -107,6 +108,8 @@ pub(crate) struct AppState {
     sidebar_toggle: Option<gtk::ToggleButton>,
     top_bar_new_ws_btn_ref: Option<gtk::Button>,
     top_bar_open_folder_btn_ref: Option<gtk::Button>,
+    /// The pending counter; placed next to the folder button.
+    top_bar_pending_btn: Option<gtk::Button>,
     top_bar_settings_btn: Option<gtk::Button>,
     sidebar_header: gtk::Box,
     sidebar_header_handle: gtk::WindowHandle,
@@ -157,6 +160,12 @@ pub(crate) struct AppState {
     session_views: HashMap<String, Vec<agent_activity_ui::SessionRowView>>,
     /// Bumped on every project switch; a pending unread clear checks it.
     unread_dwell_epoch: u64,
+    /// The pending panel while it is open.
+    pending_open: Option<pending_panel::OpenPanel>,
+    /// Latest message and its time per terminal tab, for the pending panel.
+    tab_notes: HashMap<String, (String, u64)>,
+    /// The same for projects marked unread without a terminal target.
+    workspace_notes: HashMap<String, (String, u64)>,
     _theme_portal_signal: Option<gio::SignalSubscription>,
     _theme_gnome_settings: Option<gio::Settings>,
     _theme_gnome_signal: Option<glib::SignalHandlerId>,
@@ -1740,7 +1749,7 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
         ""
     };
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         build_window_css(background_opacity),
         pane::PANE_CSS,
         crate::terminal::CLIPBOARD_TOAST_CSS,
@@ -1751,6 +1760,7 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
         workspace_color::workspace_color_css(),
         sidebar_groups::workspace_group_css(),
         agent_activity_ui::agent_activity_css(),
+        pending_panel::pending_panel_css(),
     )
 }
 
@@ -1913,6 +1923,10 @@ pub fn build_window(app: &adw::Application) {
     open_folder.update_property(&[gtk::accessible::Property::Label("Open Folder as Workspace")]);
     top_bar_content.append(&open_folder);
     top_bar_open_folder_btn = open_folder;
+
+    // Pending counter: hidden until a terminal waits or is unread.
+    let top_bar_pending_btn = pending_panel::build_counter();
+    top_bar_content.append(&top_bar_pending_btn);
 
     // Workspace indicator pills (takes the rest of the space)
     top_bar_content.append(&indicator_scroll);
@@ -2084,6 +2098,7 @@ pub fn build_window(app: &adw::Application) {
         sidebar_toggle: Some(sidebar_toggle),
         top_bar_new_ws_btn_ref: Some(top_bar_new_ws_btn.clone()),
         top_bar_open_folder_btn_ref: Some(top_bar_open_folder_btn.clone()),
+        top_bar_pending_btn: Some(top_bar_pending_btn.clone()),
         top_bar_settings_btn: Some(top_bar_settings_btn.clone()),
         sidebar_header: sidebar_header.clone(),
         sidebar_header_handle: sidebar_header_handle.clone(),
@@ -2127,6 +2142,9 @@ pub fn build_window(app: &adw::Application) {
         expanded_sessions: HashSet::new(),
         session_views: HashMap::new(),
         unread_dwell_epoch: 0,
+        pending_open: None,
+        tab_notes: HashMap::new(),
+        workspace_notes: HashMap::new(),
         _theme_portal_signal: None,
         _theme_gnome_settings: None,
         _theme_gnome_signal: None,
@@ -2302,6 +2320,7 @@ pub fn build_window(app: &adw::Application) {
     }
 
     agent_activity_ui::install_activity_timer(&state);
+    pending_panel::install(&state, &top_bar_pending_btn);
 
     {
         let state = state.clone();
@@ -2954,6 +2973,10 @@ fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) -> bool {
         }
         ShortcutCommand::PrevUnreadTerminal => {
             cycle_unread_terminal(state, false);
+            true
+        }
+        ShortcutCommand::PendingPanel => {
+            pending_panel::toggle(state);
             true
         }
         ShortcutCommand::OpenBrowserInSplit
@@ -3706,6 +3729,7 @@ struct TopBarWidgets {
     settings: gtk::Button,
     new_ws: gtk::Button,
     open_folder: gtk::Button,
+    pending: gtk::Button,
     minimize: gtk::Button,
     maximize: gtk::Button,
     close: gtk::Button,
@@ -3735,6 +3759,7 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
             Some(settings),
             Some(new_ws),
             Some(open_folder),
+            Some(pending),
             Some(minimize),
             Some(maximize),
             Some(close),
@@ -3745,6 +3770,7 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
             s.top_bar_settings_btn.clone(),
             s.top_bar_new_ws_btn_ref.clone(),
             s.top_bar_open_folder_btn_ref.clone(),
+            s.top_bar_pending_btn.clone(),
             s.top_bar_minimize_btn.clone(),
             s.top_bar_maximize_btn.clone(),
             s.top_bar_close_btn.clone(),
@@ -3759,6 +3785,7 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
             settings,
             new_ws,
             open_folder,
+            pending,
             minimize,
             maximize,
             close,
@@ -3818,6 +3845,7 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
     detach(&widgets.settings);
     detach(&widgets.new_ws);
     detach(&widgets.open_folder);
+    detach(&widgets.pending);
     detach(&widgets.minimize);
     detach(&widgets.maximize);
     detach(&widgets.close);
@@ -3860,6 +3888,7 @@ fn toolbar_layout_matches(
             widgets.settings.upcast_ref(),
             widgets.new_ws.upcast_ref(),
             widgets.open_folder.upcast_ref(),
+            widgets.pending.upcast_ref(),
             widgets.minimize.upcast_ref(),
             widgets.maximize.upcast_ref(),
             widgets.close.upcast_ref(),
@@ -3875,6 +3904,7 @@ fn layout_top_bar_visible(w: &TopBarWidgets, controls_side: app_config::WindowCo
     w.content.append(&w.settings);
     w.content.append(&w.new_ws);
     w.content.append(&w.open_folder);
+    w.content.append(&w.pending);
     w.content.append(&w.indicator_scroll);
 
     match controls_side {
@@ -3918,6 +3948,7 @@ fn layout_sidebar_header(w: &TopBarWidgets, controls_side: app_config::WindowCon
             w.sidebar_header.append(&w.settings);
             w.sidebar_header.append(&w.new_ws);
             w.sidebar_header.append(&w.open_folder);
+            w.sidebar_header.append(&w.pending);
         }
         app_config::WindowControlsSide::Right => {
             // dock | settings | + | folder || spacer || min | max | close
@@ -3925,6 +3956,7 @@ fn layout_sidebar_header(w: &TopBarWidgets, controls_side: app_config::WindowCon
             w.sidebar_header.append(&w.settings);
             w.sidebar_header.append(&w.new_ws);
             w.sidebar_header.append(&w.open_folder);
+            w.sidebar_header.append(&w.pending);
             w.sidebar_header.append(&spacer);
             w.sidebar_header.append(&w.minimize);
             w.sidebar_header.append(&w.maximize);
@@ -3947,8 +3979,13 @@ fn layout_collapsed_dock(state: &State, w: &TopBarWidgets, allow_retry: bool) {
 
     let leading_box =
         active_workspace_leading_pane(state).and_then(|pane| pane::pane_leading_box(&pane));
+    // Both bars hidden (full screen): the pending counter rides along with
+    // the dock toggle, so finished work stays one click away.
     match leading_box {
-        Some(leading) => leading.append(&w.dock),
+        Some(leading) => {
+            leading.append(&w.dock);
+            leading.append(&w.pending);
+        }
         None => {
             if allow_retry {
                 let state = state.clone();
@@ -3958,6 +3995,7 @@ fn layout_collapsed_dock(state: &State, w: &TopBarWidgets, allow_retry: bool) {
             } else {
                 // With no workspace, there is no pane header to host the toggle.
                 w.content.append(&w.dock);
+                w.content.append(&w.pending);
                 w.handle.set_visible(true);
             }
         }
@@ -9626,6 +9664,14 @@ mod tests {
                 gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK
             ),
             Some(ShortcutCommand::NextUnreadTerminal)
+        );
+        assert_eq!(
+            shortcut_command_from_key_event(
+                &shortcuts,
+                gdk::Key::p,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK
+            ),
+            Some(ShortcutCommand::PendingPanel)
         );
         assert_eq!(
             shortcut_command_from_key_event(
