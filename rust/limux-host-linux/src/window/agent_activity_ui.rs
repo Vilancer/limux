@@ -407,6 +407,8 @@ fn build_session_row(state: &State, workspace_id: &str, view: &SessionRowView) -
     match view.state_label {
         "needs approval" | "needs input" => glyph.add_css_class("limux-session-waiting"),
         "unread" => glyph.add_css_class("limux-session-unread"),
+        // A plain shell needs no sign; the terminal icon says what it is.
+        "terminal" => glyph.set_visible(false),
         _ => {}
     }
     let title = gtk::Label::builder()
@@ -416,14 +418,18 @@ fn build_session_row(state: &State, workspace_id: &str, view: &SessionRowView) -
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
     title.add_css_class("limux-session-title");
+    let icon = gtk::Image::from_icon_name("utilities-terminal-symbolic");
+    icon.set_pixel_size(12);
+    icon.add_css_class("limux-session-icon");
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    content.append(&glyph);
+    content.append(&icon);
     content.append(&title);
     if let Some(agent) = &view.agent {
         let agent = gtk::Label::new(Some(agent));
         agent.add_css_class("limux-session-agent");
         content.append(&agent);
     }
+    content.append(&glyph);
 
     let button = gtk::Button::builder()
         .child(&content)
@@ -433,6 +439,8 @@ fn build_session_row(state: &State, workspace_id: &str, view: &SessionRowView) -
     button.add_css_class("limux-session-row");
     if view.background {
         button.add_css_class("limux-session-row-background");
+    } else {
+        button.add_css_class("limux-session-row-shown");
     }
     let spoken = match &view.agent {
         Some(agent) => format!("{}, {agent}, {}", view.title, view.state_label),
@@ -490,15 +498,35 @@ pub(super) fn agent_activity_css() -> &'static str {
     color: alpha(@window_fg_color, 0.55);
 }
 .limux-ws-sessions {
-    margin: 2px 0 0 14px;
+    margin: 6px 0 2px 8px;
+    padding: 2px 0 2px 8px;
+    border-left: 1px solid alpha(@window_fg_color, 0.2);
 }
+/* Each terminal is a small tab: its own chip, normal weight (Adwaita makes
+   button labels bold, which made them read as the project's name). */
 .limux-session-row {
-    min-height: 22px;
-    padding: 1px 6px;
+    min-height: 24px;
+    padding: 2px 8px;
+    margin: 2px 0;
     border-radius: 6px;
+    background: alpha(@window_fg_color, 0.07);
 }
-.limux-session-row-background .limux-session-title {
+.limux-session-row:hover {
+    background: alpha(@window_fg_color, 0.14);
+}
+.limux-session-row label {
+    font-weight: 400;
+}
+/* The tab on screen in its pane. */
+.limux-session-row-shown {
+    box-shadow: inset 2px 0 0 0 @accent_bg_color;
+}
+.limux-session-row-background .limux-session-title,
+.limux-session-row-background .limux-session-icon {
     opacity: 0.55;
+}
+.limux-session-icon {
+    color: alpha(@window_fg_color, 0.7);
 }
 .limux-session-glyph {
     min-width: 12px;
@@ -513,8 +541,9 @@ pub(super) fn agent_activity_css() -> &'static str {
     color: alpha(@window_fg_color, 0.5);
 }
 .limux-session-pane-gap {
-    margin: 2px 6px;
-    opacity: 0.5;
+    margin: 4px 0;
+    background: alpha(@window_fg_color, 0.25);
+    min-height: 1px;
 }
 .limux-session-empty {
     font-size: 11px;

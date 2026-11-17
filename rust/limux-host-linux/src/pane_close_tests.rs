@@ -1346,3 +1346,95 @@ fn pending_panel_works_with_both_bars_hidden() {
     let window = state.borrow().window.clone();
     window.close();
 }
+
+/// Save `widget` as a PNG when LIMUX_TEST_SNAPSHOT_DIR is set (manual review).
+fn snapshot_widget(widget: &gtk::Widget, name: &str) {
+    let Some(dir) = std::env::var_os("LIMUX_TEST_SNAPSHOT_DIR") else {
+        return;
+    };
+    let paintable = gtk::WidgetPaintable::new(Some(widget));
+    let snapshot = gtk::Snapshot::new();
+    paintable.snapshot(&snapshot, widget.width() as f64, widget.height() as f64);
+    let Some(node) = snapshot.to_node() else {
+        return;
+    };
+    let renderer = widget
+        .native()
+        .and_then(|native| native.renderer())
+        .unwrap();
+    let texture = renderer.render_texture(&node, None);
+    texture
+        .save_to_png(std::path::Path::new(&dir).join(format!("{name}.png")))
+        .unwrap();
+}
+
+// The ▸ on a project row lists its terminals as tabs: one chip per terminal,
+// the one on screen marked, background ones dimmed, and a click focuses it.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn session_rows_list_terminals_as_tabs() {
+    let (state, _temp) = pending_test_window("dev.limux.SessionRowsTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    let first = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    let second = pane::active_surface_summary(&pane).unwrap();
+    activate_workspace_shortcut(&state, 0);
+    pump_for(std::time::Duration::from_millis(500));
+    agent_activity_ui::handle_agent_activity(
+        &state,
+        &WorkspaceTarget::Active,
+        &first.tab_id,
+        "claude".to_string(),
+        Some(crate::agent_activity::AgentPhase::Working),
+        None,
+        1,
+    )
+    .unwrap();
+
+    let (toggle, sessions, sidebar) = {
+        let s = state.borrow();
+        let workspace = s.workspaces.iter().find(|w| w.id == ws_id).unwrap();
+        (
+            workspace.sessions_toggle.clone(),
+            workspace.sessions_box.clone(),
+            s.sidebar_shell.clone(),
+        )
+    };
+    assert!(!sessions.is_visible());
+    toggle.emit_clicked();
+    pump_for(std::time::Duration::from_millis(300));
+    assert!(sessions.is_visible());
+
+    let rows: Vec<gtk::Button> = widget_tree(sessions.upcast_ref())
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+        .filter(|button| button.has_css_class("limux-session-row"))
+        .collect();
+    assert_eq!(rows.len(), 2, "one tab chip per terminal");
+    assert!(
+        rows[1].has_css_class("limux-session-row-shown"),
+        "the tab on screen is marked"
+    );
+    assert!(
+        rows[0].has_css_class("limux-session-row-background"),
+        "the background tab is dimmed"
+    );
+    snapshot_widget(sidebar.upcast_ref(), "session-rows");
+
+    rows[0].emit_clicked();
+    pump_until(wait, || {
+        pane::active_tab_in_pane(&pane).as_deref() == Some(first.tab_id.as_str())
+    });
+    assert_eq!(
+        pane::active_tab_in_pane(&pane).as_deref(),
+        Some(first.tab_id.as_str())
+    );
+    let _ = second;
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
