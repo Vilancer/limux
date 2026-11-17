@@ -50,7 +50,11 @@ working and waiting terminals:
 | `SessionEnd` | ended |
 
 `PostToolUse` is new: it tells Limux that a tool ran after you approved it.
-Run `limux hooks setup` again to add it. The report is best effort: outside a
+Hooks installed by an older Limux lack it, so a request you approved keeps
+showing as waiting until Claude's turn ends. Run `limux hooks setup claude`
+again to add it, once per Claude config directory if you use several
+(`CLAUDE_CONFIG_DIR=<dir> limux hooks setup claude`), and restart running
+Claude Code sessions. The report is best effort: outside a
 Limux terminal, over SSH or with `LIMUX_NOTIFY_OSC=1` nothing is sent, and the
 agent is never held up. Codex, Gemini and OpenCode keep their notifications and
 report no live state yet.
