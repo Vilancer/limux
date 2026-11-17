@@ -391,8 +391,20 @@ after it starts is kept the same way, so its error stays readable.
 
 ### Agent activity in the sidebar
 
-With Claude Code hooks installed (`limux hooks setup`), each terminal reports
-what its agent is doing, and the sidebar shows it without opening anything:
+With Claude Code hooks installed, each terminal reports what its agent is
+doing, and the sidebar shows it without opening anything.
+
+To set it up, or to update hooks installed by an older Limux, run:
+
+```bash
+limux hooks setup claude
+```
+
+It writes to `$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`,
+and keeps your other hooks. If you use more than one Claude config directory,
+run it once per directory, for example
+`CLAUDE_CONFIG_DIR=~/.claude-work limux hooks setup claude`. Claude Code reads
+its hooks when a session starts, so restart running sessions afterwards.
 
 | Sign | Meaning |
 |---|---|
