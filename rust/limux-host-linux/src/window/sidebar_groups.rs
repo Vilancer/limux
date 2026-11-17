@@ -6,7 +6,7 @@ use super::*;
 use crate::agent_activity::{ActivityCounts, GLYPH_UNREAD, GLYPH_WAITING, GLYPH_WORKING};
 use crate::control_bridge::GroupRequest;
 use crate::workspace_group::{
-    GroupError, SidebarRow, WaitingPreviews, WorkspaceGroup, WAITING_PREVIEW_CAP,
+    ActivePreviews, Activity, GroupError, SidebarRow, WorkspaceGroup, ACTIVE_PREVIEW_CAP,
 };
 
 /// Drag payload prefix for a group header. Tab payloads are `pane:tab` with
@@ -23,13 +23,14 @@ pub(super) struct GroupHeader {
     pill: gtk::Box,
     name_label: gtk::Label,
     count_label: gtk::Label,
-    /// "↻ N": working terminals in the group, shown even when collapsed.
-    working_label: gtk::Label,
+    /// "↻ N": working terminals in the group, shown even when collapsed; a
+    /// click goes to the next one.
+    working_label: gtk::Button,
     /// "◆ N": waiting terminals; a click goes to the next one.
     waiting_button: gtk::Button,
     /// "● N": unread projects, when none waits; a click goes to the next one.
     unread_button: gtk::Button,
-    /// Below a collapsed group: "N more waiting", past the preview cap.
+    /// Below a collapsed group: "N more", the active projects past the cap.
     more_row: gtk::ListBoxRow,
     more_button: gtk::Button,
 }
@@ -115,9 +116,17 @@ fn build_group_header(state: &State, group_id: &str) -> GroupHeader {
     let count_label = gtk::Label::new(None);
     count_label.add_css_class("limux-ws-group-count");
 
-    let working_label = gtk::Label::new(None);
+    let working_label = gtk::Button::new();
+    working_label.add_css_class("flat");
     working_label.add_css_class("limux-ws-group-working");
+    working_label.set_focus_on_click(false);
+    working_label.set_valign(gtk::Align::Center);
     working_label.set_visible(false);
+    {
+        let state = state.clone();
+        let group_id = group_id.to_string();
+        working_label.connect_clicked(move |_| cycle_working_terminal(&state, &group_id));
+    }
 
     let waiting_button = gtk::Button::new();
     waiting_button.add_css_class("flat");
@@ -165,7 +174,7 @@ fn build_group_header(state: &State, group_id: &str) -> GroupHeader {
     {
         let state = state.clone();
         let group_id = group_id.to_string();
-        more_button.connect_clicked(move |_| show_next_hidden_waiting(&state, &group_id));
+        more_button.connect_clicked(move |_| show_next_hidden_active(&state, &group_id));
     }
     let more_row = gtk::ListBoxRow::new();
     more_row.set_selectable(false);
@@ -202,17 +211,22 @@ fn update_group_activity(
     group: &WorkspaceGroup,
     counts: ActivityCounts,
     unread_projects: usize,
-    hidden_waiting: usize,
+    hidden_active: usize,
 ) {
     header
         .working_label
         .set_label(&format!("{GLYPH_WORKING} {}", counts.working));
     header.working_label.set_visible(counts.working > 0);
-    header.working_label.set_tooltip_text(Some(&format!(
-        "{} agent{} working",
+    let working_tip = format!(
+        "{}: {} agent{} working. Go to the next one",
+        group.name,
         counts.working,
         if counts.working == 1 { "" } else { "s" }
-    )));
+    );
+    header.working_label.set_tooltip_text(Some(&working_tip));
+    header
+        .working_label
+        .update_property(&[gtk::accessible::Property::Label(&working_tip)]);
     header
         .waiting_button
         .set_label(&format!("{GLYPH_WAITING} {}", counts.waiting));
@@ -247,15 +261,16 @@ fn update_group_activity(
 
     header
         .more_button
-        .set_label(&format!("{hidden_waiting} more waiting"));
-    let more_tip = format!("Go to the next waiting project in {}", group.name);
+        .set_label(&format!("{hidden_active} more"));
+    let more_tip = format!(
+        "{hidden_active} more active project{} in {}. Go to the next one",
+        if hidden_active == 1 { "" } else { "s" },
+        group.name
+    );
     header.more_button.set_tooltip_text(Some(&more_tip));
     header
         .more_button
-        .update_property(&[gtk::accessible::Property::Label(&format!(
-            "{hidden_waiting} more waiting in {}. {more_tip}",
-            group.name
-        ))]);
+        .update_property(&[gtk::accessible::Property::Label(&more_tip)]);
 
     let mut summary = header
         .row
@@ -273,7 +288,7 @@ fn update_group_activity(
 /// Activity counts per workspace, the waiting projects collapsed groups keep
 /// visible, and the counts per group.
 struct GroupActivity {
-    previews: WaitingPreviews,
+    previews: ActivePreviews,
     by_group: HashMap<String, ActivityCounts>,
     /// Group id → members with unread marks.
     unread_by_group: HashMap<String, usize>,
@@ -291,14 +306,19 @@ fn group_activity(s: &AppState) -> GroupActivity {
         })
         .collect();
     let active = s.active_workspace().map(|workspace| workspace.id.as_str());
-    let previews = s.sidebar.waiting_previews(
+    let previews = s.sidebar.active_previews(
         active,
         |id| {
-            by_workspace
-                .get(id)
-                .is_some_and(|counts| counts.waiting > 0)
+            let counts = by_workspace.get(id)?;
+            if counts.waiting > 0 {
+                Some(Activity::Waiting)
+            } else if counts.working > 0 {
+                Some(Activity::Working)
+            } else {
+                None
+            }
         },
-        WAITING_PREVIEW_CAP,
+        ACTIVE_PREVIEW_CAP,
     );
     let by_group = s
         .sidebar
@@ -342,10 +362,10 @@ fn group_activity(s: &AppState) -> GroupActivity {
     }
 }
 
-/// The "N more waiting" row: go to the first waiting project the collapsed
-/// group left out. Once it is selected it shows as the selected row, so the
+/// The "N more" row: go to the first active project the collapsed group left
+/// out (waiting ones first). Once it is selected it shows as the selected row, so the
 /// next click reaches the next one.
-fn show_next_hidden_waiting(state: &State, group_id: &str) {
+fn show_next_hidden_active(state: &State, group_id: &str) {
     let first_hidden = {
         let s = state.borrow();
         group_activity(&s)
@@ -357,15 +377,17 @@ fn show_next_hidden_waiting(state: &State, group_id: &str) {
     let Some(workspace_id) = first_hidden else {
         return;
     };
-    let tab = pane::terminal_tab_ids_in_workspace(&workspace_id)
-        .into_iter()
-        .find(|tab_id| {
-            state
-                .borrow()
-                .agent_activity
-                .phase(tab_id)
-                .is_some_and(crate::agent_activity::AgentPhase::is_waiting)
-        });
+    // Its waiting terminal, else its working one.
+    let tabs = pane::terminal_tab_ids_in_workspace(&workspace_id);
+    let phase = |tab_id: &String| state.borrow().agent_activity.phase(tab_id);
+    let tab = tabs
+        .iter()
+        .find(|tab_id| phase(tab_id).is_some_and(crate::agent_activity::AgentPhase::is_waiting))
+        .or_else(|| {
+            tabs.iter()
+                .find(|tab_id| phase(tab_id) == Some(crate::agent_activity::AgentPhase::Working))
+        })
+        .cloned();
     let pane_id = tab.as_deref().and_then(|tab_id| {
         pane::tab_candidates_for_workspace(&workspace_id, tab_id, true)
             .into_iter()
@@ -476,7 +498,7 @@ pub(super) fn sync_sidebar(state: &State) {
         }
 
         let mut rows = Vec::new();
-        // A group's "N more waiting" row goes after its last member.
+        // A group's "N more" row goes after its last member.
         let mut pending_more: Option<(gtk::ListBoxRow, bool)> = None;
         for row in sidebar.rows() {
             if matches!(

@@ -418,9 +418,10 @@ its hooks when a session starts, so restart running sessions afterwards.
   group is collapsed. Clicking `◆ N` goes to the group's next waiting terminal.
   While nothing in the group waits, `● N` counts its unread projects, so a reply
   that finished in a collapsed group still shows; clicking it goes there.
-- A collapsed group keeps up to three waiting projects visible below its
-  header, the selected project not counted, then a **N more waiting** row that
-  goes to the next one.
+- A collapsed group keeps up to three active projects visible below its
+  header, waiting ones first, then working ones; the selected project is not
+  counted. Past three, a **N more** row goes to the next one. Clicking `↻ N` on
+  the header goes to the group's next working terminal, without expanding it.
 - `Ctrl+Alt+U` goes to the next terminal waiting for you, or to the next unread
   terminal when nothing waits.
 - The `▸` on a project row lists its terminals, split panes in order with a line
