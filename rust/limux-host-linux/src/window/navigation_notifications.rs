@@ -364,9 +364,20 @@ pub(super) fn cycle_unread_terminal(state: &State, forward: bool) {
     cycle_attention_terminal(state, forward, None);
 }
 
+/// Go to the next working terminal of a group's projects (the group header's
+/// working button), leaving the group as it is.
+pub(super) fn cycle_working_terminal(state: &State, group: &str) {
+    cycle_terminals(state, true, Some(group), true);
+}
+
 /// As `cycle_unread_terminal`; with `group`, only that group's projects
 /// (the group header's waiting and unread buttons).
 pub(super) fn cycle_attention_terminal(state: &State, forward: bool, group: Option<&str>) {
+    cycle_terminals(state, forward, group, false);
+}
+
+/// Cycle waiting-then-unread terminals, or with `working` the working ones.
+fn cycle_terminals(state: &State, forward: bool, group: Option<&str>, working: bool) {
     let members = group.map(|group| {
         state
             .borrow()
@@ -422,12 +433,13 @@ pub(super) fn cycle_attention_terminal(state: &State, forward: bool, group: Opti
                 current = (workspace_idx, pane_idx, active_tab);
             }
             for (tab_idx, tab_id) in pane::tab_ids_in_pane(pane_widget).into_iter().enumerate() {
-                let waiting = state
-                    .borrow()
-                    .agent_activity
-                    .phase(&tab_id)
-                    .is_some_and(crate::agent_activity::AgentPhase::is_waiting);
-                if waiting {
+                let phase = state.borrow().agent_activity.phase(&tab_id);
+                let matches = if working {
+                    phase == Some(crate::agent_activity::AgentPhase::Working)
+                } else {
+                    phase.is_some_and(crate::agent_activity::AgentPhase::is_waiting)
+                };
+                if matches {
                     waiting_stops.push((workspace_idx, pane_idx, tab_idx));
                     waiting_targets.push(DesktopNotificationTarget {
                         workspace_id: workspace_id.clone(),
@@ -456,7 +468,7 @@ pub(super) fn cycle_attention_terminal(state: &State, forward: bool, group: Opti
             });
         }
     }
-    if !waiting_stops.is_empty() {
+    if working || !waiting_stops.is_empty() {
         stops = waiting_stops;
         targets = waiting_targets;
     }

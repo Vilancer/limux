@@ -522,9 +522,11 @@ pub(super) fn agent_activity_css() -> &'static str {
     margin-left: 6px;
 }
 .limux-ws-group-working {
-    color: alpha(white, 0.7);
+    min-height: 0;
+    padding: 0 6px;
+    margin-left: 4px;
+    color: alpha(white, 0.75);
     font-size: 11px;
-    margin-left: 6px;
 }
 .limux-ws-group-waiting {
     min-height: 0;
