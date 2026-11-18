@@ -3274,6 +3274,26 @@ pub fn clear_all_tabs_unread_in_root(root: &gtk::Widget) -> bool {
     changed
 }
 
+/// Like [`clear_all_tabs_unread_in_root`] for a list of panes, so panes a
+/// zoom keeps out of the root are cleared too.
+pub fn clear_all_tabs_unread_in_panes(panes: &[gtk::Widget]) -> bool {
+    let mut changed = false;
+    for internals in panes.iter().filter_map(find_pane_internals) {
+        let tab_ids: Vec<String> = internals
+            .tab_state
+            .borrow()
+            .tabs
+            .iter()
+            .filter(|entry| entry.unread)
+            .map(|entry| entry.id.clone())
+            .collect();
+        for tab_id in tab_ids {
+            changed |= clear_tab_unread(&internals.tab_state, &tab_id);
+        }
+    }
+    changed
+}
+
 pub fn mark_active_tab_manual_unread_in_root(root: &gtk::Widget) -> bool {
     let mut changed = false;
     for internals in pane_internals_for_root(root) {

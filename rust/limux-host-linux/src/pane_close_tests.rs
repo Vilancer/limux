@@ -1263,6 +1263,63 @@ fn pending_panel_lists_a_finished_terminal_and_jumps_to_it() {
     window.close();
 }
 
+// A zoom keeps the other panes out of the workspace root. A finished terminal
+// in such a pane still counts, is listed, and "Mark all read" reaches it.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn pending_panel_reaches_a_pane_hidden_by_zoom() {
+    let (state, _temp) = pending_test_window("dev.limux.PendingZoomTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let kept = first_leaf_pane(&root);
+    let hidden = split_before(&state, &ws_id, &kept);
+    let finished = pane::active_surface_summary(&hidden).unwrap();
+    let (container, root) = {
+        let s = state.borrow();
+        let workspace = s.workspaces.iter().find(|w| w.id == ws_id).unwrap();
+        (workspace.split_container.clone(), workspace.root.clone())
+    };
+    assert!(container.toggle_zoom(&kept));
+    pump_until(wait, || !hidden.is_ancestor(&root));
+    assert!(!hidden.is_ancestor(&root), "the zoom hid the other pane");
+
+    mark_workspace_unread_with_message(
+        &state,
+        &ws_id,
+        "Claude finished behind the zoom",
+        false,
+        DesktopNotificationTarget {
+            workspace_id: ws_id.clone(),
+            pane_id: Some(finished.pane_id),
+            tab_id: Some(finished.tab_id.clone()),
+        },
+    );
+    pump_for(std::time::Duration::from_millis(1500));
+    let counter = pending_counter(&state);
+    assert!(counter.is_visible(), "the hidden pane counts");
+    assert_eq!(counter.label().as_deref(), Some("\u{25CF} 1"));
+
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_until(wait, || pending_panel::open_entry_count(&state).is_some());
+    assert_eq!(pending_panel::open_entry_count(&state), Some(1));
+
+    pending_panel::click_mark_all(&state);
+    pump_until(wait, || !pane::workspace_has_unread_tabs(&ws_id));
+    assert!(
+        !pane::workspace_has_unread_tabs(&ws_id),
+        "mark all read reached the hidden pane"
+    );
+    assert!(!counter.is_visible(), "nothing pending any more");
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
 // With the top bar and the sidebar hidden, the counter moves next to the
 // sidebar toggle in the pane header, the panel still opens, and "Mark all
 // read" leaves a waiting terminal in place.

@@ -22,6 +22,8 @@ pub(super) struct OpenPanel {
     summary: gtk::Label,
     mark_all: gtk::Button,
     entries: Vec<PendingEntry>,
+    /// Each entry's age label with its time, refreshed while the panel is open.
+    ages: Vec<(gtk::Label, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,8 +84,8 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
     let mut entries = Vec::new();
     for workspace in &s.workspaces {
         let group_color = s.sidebar.group_of(&workspace.id).map(|group| group.color);
-        let mut panes = Vec::new();
-        collect_leaf_panes(&workspace.root, &mut panes);
+        // Every pane, including ones a zoom keeps out of the root.
+        let panes = workspace.split_container.panes();
         let mut any_tab_unread = false;
         for pane_widget in &panes {
             let Some(pane::PaneSessionTabs { pane_id, tabs }) =
@@ -208,10 +210,28 @@ pub(super) fn sync(state: &State) {
     });
     if let Some((changed, list, summary, mark_all)) = open {
         if changed {
-            fill_list(&list, &summary, &mark_all, &entries);
+            let ages = fill_list(&list, &summary, &mark_all, &entries);
             if let Some(open) = state.borrow_mut().pending_open.as_mut() {
                 open.entries = entries;
+                open.ages = ages;
             }
+        } else {
+            refresh_ages(state);
+        }
+    }
+}
+
+/// Keep "2m" style ages current while the list itself is unchanged.
+fn refresh_ages(state: &State) {
+    let s = state.borrow();
+    let Some(open) = s.pending_open.as_ref() else {
+        return;
+    };
+    let now = agent_activity::now_ms();
+    for (label, at_ms) in &open.ages {
+        let text = agent_activity::ago_label(now, *at_ms);
+        if label.label() != text {
+            label.set_label(&text);
         }
     }
 }
@@ -355,15 +375,28 @@ fn open_panel(state: &State) {
     }
 
     let entries = pending_entries(state);
-    fill_list(&list, &summary, &mark_all, &entries);
+    let ages = fill_list(&list, &summary, &mark_all, &entries);
     state.borrow_mut().pending_open = Some(OpenPanel {
         popover: popover.clone(),
         list: list.clone(),
         summary,
         mark_all,
         entries,
+        ages,
     });
     popover.popup();
+    let weak_popover = popover.downgrade();
+    let state_for_ages = state.clone();
+    glib::timeout_add_seconds_local(1, move || {
+        let open = weak_popover
+            .upgrade()
+            .is_some_and(|popover| popover.is_visible());
+        if !open {
+            return glib::ControlFlow::Break;
+        }
+        refresh_ages(&state_for_ages);
+        glib::ControlFlow::Continue
+    });
     if let Some(first) = list.row_at_index(0).filter(|row| row.is_activatable()) {
         list.select_row(Some(&first));
         first.grab_focus();
@@ -389,7 +422,7 @@ fn fill_list(
     summary: &gtk::Label,
     mark_all: &gtk::Button,
     entries: &[PendingEntry],
-) {
+) -> Vec<(gtk::Label, u64)> {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
@@ -409,10 +442,11 @@ fn fill_list(
         row.set_selectable(false);
         row.set_child(Some(&empty));
         list.append(&row);
-        return;
+        return Vec::new();
     }
 
     let now = agent_activity::now_ms();
+    let mut ages = Vec::new();
     let mut section = None;
     for (index, entry) in entries.iter().enumerate() {
         if section != Some(entry.kind) {
@@ -429,11 +463,14 @@ fn fill_list(
             row.set_child(Some(&label));
             list.append(&row);
         }
-        list.append(&entry_row(entry, index, now));
+        let (row, age) = entry_row(entry, index, now);
+        list.append(&row);
+        ages.push((age, entry.at_ms));
     }
+    ages
 }
 
-fn entry_row(entry: &PendingEntry, index: usize, now: u64) -> gtk::ListBoxRow {
+fn entry_row(entry: &PendingEntry, index: usize, now: u64) -> (gtk::ListBoxRow, gtk::Label) {
     let glyph = gtk::Label::new(Some(match entry.kind {
         PendingKind::Waiting => GLYPH_WAITING,
         PendingKind::Unread => GLYPH_UNREAD,
@@ -492,7 +529,7 @@ fn entry_row(entry: &PendingEntry, index: usize, now: u64) -> gtk::ListBoxRow {
     );
     row.set_tooltip_text(Some(&spoken));
     row.update_property(&[gtk::accessible::Property::Label(&spoken)]);
-    row
+    (row, age)
 }
 
 fn activate_row(state: &State, row: &gtk::ListBoxRow) {
@@ -524,7 +561,7 @@ fn activate_row(state: &State, row: &gtk::ListBoxRow) {
 
 /// Clear every unread mark. Waiting terminals stay: only the agent clears them.
 fn mark_all_read(state: &State) {
-    let roots: Vec<(String, gtk::Widget)> = {
+    let workspaces: Vec<(String, Vec<gtk::Widget>)> = {
         let mut s = state.borrow_mut();
         s.tab_notes.clear();
         s.workspace_notes.clear();
@@ -533,14 +570,14 @@ fn mark_all_read(state: &State) {
             .map(|workspace| {
                 workspace.unread = false;
                 workspace.manual_unread = false;
-                (workspace.id.clone(), workspace.root.clone())
+                (workspace.id.clone(), workspace.split_container.panes())
             })
             .collect()
     };
-    for (_, root) in &roots {
-        pane::clear_all_tabs_unread_in_root(root);
+    for (_, panes) in &workspaces {
+        pane::clear_all_tabs_unread_in_panes(panes);
     }
-    for (id, _) in &roots {
+    for (id, _) in &workspaces {
         paint_workspace_unread(state, id);
     }
     sidebar_groups::sync_group_headers(state);

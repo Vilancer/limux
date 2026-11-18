@@ -253,12 +253,10 @@ fn agent_label(agent: &str) -> String {
 
 /// The rows of a project's session list: every terminal with `all`, else
 /// only the active ones (working, waiting or unread).
-fn session_row_views(s: &AppState, root: &gtk::Widget, all: bool) -> Vec<SessionRowView> {
-    let mut panes = Vec::new();
-    collect_leaf_panes(root, &mut panes);
+fn session_row_views(s: &AppState, panes: &[gtk::Widget], all: bool) -> Vec<SessionRowView> {
     let mut views = Vec::new();
     let mut pane_index = 0;
-    for pane_widget in &panes {
+    for pane_widget in panes {
         let Some(pane::PaneSessionTabs { pane_id, tabs }) = pane::session_tabs_in_pane(pane_widget)
         else {
             continue;
@@ -352,7 +350,7 @@ pub(super) fn attach_session_list(
 /// Rebuild a project's session list when it is open and its rows changed
 /// (or always with `force`), and hide it when it is closed.
 pub(super) fn refresh_session_rows(state: &State, workspace_id: &str, force: bool) {
-    let (expanded, toggle, container, root, old) = {
+    let (expanded, toggle, container, panes, old) = {
         let s = state.borrow();
         let Some(workspace) = s
             .workspaces
@@ -365,7 +363,8 @@ pub(super) fn refresh_session_rows(state: &State, workspace_id: &str, force: boo
             s.expanded_sessions.contains(workspace_id),
             workspace.sessions_toggle.clone(),
             workspace.sessions_box.clone(),
-            workspace.root.clone(),
+            // Every pane, including ones a zoom keeps out of the root.
+            workspace.split_container.panes(),
             s.session_views.get(workspace_id).cloned(),
         )
     };
@@ -381,7 +380,7 @@ pub(super) fn refresh_session_rows(state: &State, workspace_id: &str, force: boo
 
     // Closed, the list still shows the active terminals, so a working or
     // waiting tab is visible under its project without opening anything.
-    let views = session_row_views(&state.borrow(), &root, expanded);
+    let views = session_row_views(&state.borrow(), &panes, expanded);
     if !force && old.as_ref() == Some(&views) {
         return;
     }
