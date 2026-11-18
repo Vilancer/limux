@@ -591,6 +591,13 @@ pub(super) fn open_entry_count(state: &State) -> Option<usize> {
     open.popover.is_visible().then_some(open.entries.len())
 }
 
+/// The open panel's popover, for snapshots.
+#[cfg(test)]
+pub(super) fn open_popover(state: &State) -> Option<gtk::Popover> {
+    let s = state.borrow();
+    s.pending_open.as_ref().map(|open| open.popover.clone())
+}
+
 /// Activate the open panel's entry at `index` as a click or Enter would.
 #[cfg(test)]
 pub(super) fn activate_entry(state: &State, index: usize) {

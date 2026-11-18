@@ -1415,6 +1415,11 @@ fn snapshot_widget(widget: &gtk::Widget, name: &str) {
     };
     let paintable = gtk::WidgetPaintable::new(Some(widget));
     let snapshot = gtk::Snapshot::new();
+    // A dark backdrop, as popovers draw on their own (transparent) surface.
+    snapshot.append_color(
+        &gtk::gdk::RGBA::new(0.12, 0.12, 0.13, 1.0),
+        &gtk::graphene::Rect::new(0.0, 0.0, widget.width() as f32, widget.height() as f32),
+    );
     paintable.snapshot(&snapshot, widget.width() as f64, widget.height() as f64);
     let Some(node) = snapshot.to_node() else {
         return;
@@ -1515,5 +1520,204 @@ fn session_rows_list_terminals_as_tabs() {
     let _ = second;
 
     let window = state.borrow().window.clone();
+    window.close();
+}
+
+/// Adds a named one-pane workspace and returns its id and pane.
+fn add_named_workspace(state: &State, name: &str) -> (String, gtk::Widget) {
+    add_workspace_from_state(
+        state,
+        &WorkspaceState {
+            color: None,
+            group_id: None,
+            id: None,
+            name: name.to_string(),
+            favorite: false,
+            cwd: None,
+            folder_path: None,
+            autostart_command: None,
+            layout: LayoutNodeState::Pane(PaneState::fallback(None)),
+        },
+    );
+    let s = state.borrow();
+    let workspace = s.workspaces.last().unwrap();
+    let pane = first_leaf_pane(&workspace.root);
+    (workspace.id.clone(), pane)
+}
+
+fn report(
+    state: &State,
+    ws_id: &str,
+    tab_id: &str,
+    phase: crate::agent_activity::AgentPhase,
+    detail: &str,
+) {
+    agent_activity_ui::handle_agent_activity(
+        state,
+        &WorkspaceTarget::Handle(ws_id.to_string()),
+        tab_id,
+        crate::agent_activity::AgentEvent {
+            tab_id: String::new(),
+            agent: "claude".to_string(),
+            phase: Some(phase),
+            session_id: None,
+            at_ms: crate::agent_activity::now_ms(),
+            detail: (!detail.is_empty()).then(|| detail.to_string()),
+        },
+    )
+    .unwrap();
+}
+
+// Not a check: builds a realistic sidebar (two groups, one collapsed, agents
+// working, waiting and finished) and saves pictures of each view for a UX
+// review. Run with LIMUX_TEST_SNAPSHOT_DIR set.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn ux_tour_snapshots() {
+    use crate::agent_activity::AgentPhase::*;
+    let (state, _temp) = pending_test_window("dev.limux.UxTour");
+    let window = state.borrow().window.clone();
+    window.set_default_size(1280, 800);
+
+    let clients = [
+        ("api-server", Some(Working), "Bash: cargo test --workspace"),
+        ("billing", Some(NeedsApproval), "Bash: psql -f migrate.sql"),
+        ("docs-site", None, ""),
+        ("mobile-app", None, "finished"),
+        ("infra", Some(Working), "Edit: main.tf"),
+        ("search", Some(Working), "Grep: fn rank"),
+    ];
+    let mut client_ids = Vec::new();
+    let mut reports = Vec::new();
+    for (name, phase, detail) in clients {
+        let (id, pane) = add_named_workspace(&state, name);
+        let tab = pane::active_surface_summary(&pane).unwrap();
+        client_ids.push(id.clone());
+        reports.push((id, tab, phase, detail));
+    }
+    let (limux_id, limux_pane) = add_named_workspace(&state, "limux");
+    let limux_first = pane::active_surface_summary(&limux_pane).unwrap();
+    pane::add_terminal_tab_to_pane(&limux_pane);
+    let limux_second = pane::active_surface_summary(&limux_pane).unwrap();
+    pane::add_terminal_tab_to_pane(&limux_pane);
+    let (ghostty_id, ghostty_pane) = add_named_workspace(&state, "ghostty");
+    let ghostty_tab = pane::active_surface_summary(&ghostty_pane).unwrap();
+    let (_notes_id, _) = add_named_workspace(&state, "notes");
+
+    let clients_group = sidebar_groups::create_group(
+        &state,
+        Some("Clients"),
+        Some(WorkspaceColor::Blue),
+        &client_ids,
+    )
+    .unwrap();
+    sidebar_groups::create_group(
+        &state,
+        Some("Limux"),
+        Some(WorkspaceColor::Teal),
+        &[limux_id.clone(), ghostty_id.clone()],
+    )
+    .unwrap();
+    sidebar_groups::set_group_collapsed(&state, &clients_group, true).unwrap();
+    let limux_index = state
+        .borrow()
+        .workspaces
+        .iter()
+        .position(|w| w.id == limux_id)
+        .unwrap();
+    select_workspace_by_index(&state, limux_index);
+    pump_for(std::time::Duration::from_millis(800));
+
+    for (id, tab, phase, detail) in &reports {
+        match phase {
+            Some(phase) => report(&state, id, &tab.tab_id, *phase, detail),
+            None if *detail == "finished" => {
+                mark_workspace_unread_with_message(
+                    &state,
+                    id,
+                    "Claude finished: all 214 tests pass",
+                    false,
+                    DesktopNotificationTarget {
+                        workspace_id: id.clone(),
+                        pane_id: Some(tab.pane_id),
+                        tab_id: Some(tab.tab_id.clone()),
+                    },
+                );
+            }
+            None => report(&state, id, &tab.tab_id, Idle, ""),
+        }
+    }
+    report(
+        &state,
+        &limux_id,
+        &limux_first.tab_id,
+        Working,
+        "Bash: ./scripts/check.sh",
+    );
+    report(
+        &state,
+        &limux_id,
+        &limux_second.tab_id,
+        NeedsInput,
+        "Which branch should I rebase onto?",
+    );
+    mark_workspace_unread_with_message(
+        &state,
+        &ghostty_id,
+        "Claude finished: zig build passed",
+        false,
+        DesktopNotificationTarget {
+            workspace_id: ghostty_id.clone(),
+            pane_id: Some(ghostty_tab.pane_id),
+            tab_id: Some(ghostty_tab.tab_id.clone()),
+        },
+    );
+    pump_for(std::time::Duration::from_millis(1500));
+    let content = window.child().unwrap();
+    snapshot_widget(&content, "tour-1-overview");
+    let sidebar = state.borrow().sidebar_shell.clone();
+    snapshot_widget(sidebar.upcast_ref(), "tour-2-sidebar");
+
+    let toggle = {
+        let s = state.borrow();
+        s.workspaces
+            .iter()
+            .find(|w| w.id == limux_id)
+            .unwrap()
+            .sessions_toggle
+            .clone()
+    };
+    toggle.emit_clicked();
+    pump_for(std::time::Duration::from_millis(400));
+    snapshot_widget(sidebar.upcast_ref(), "tour-3-sidebar-all-terminals");
+    toggle.emit_clicked();
+
+    sidebar_groups::set_group_collapsed(&state, &clients_group, false).unwrap();
+    pump_for(std::time::Duration::from_millis(400));
+    snapshot_widget(sidebar.upcast_ref(), "tour-4-sidebar-group-expanded");
+    sidebar_groups::set_group_collapsed(&state, &clients_group, true).unwrap();
+    pump_for(std::time::Duration::from_millis(400));
+
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_until(std::time::Duration::from_secs(5), || {
+        pending_panel::open_entry_count(&state).is_some()
+    });
+    pump_for(std::time::Duration::from_millis(400));
+    let popover = pending_panel::open_popover(&state).unwrap();
+    snapshot_widget(popover.upcast_ref(), "tour-5-pending-panel");
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_for(std::time::Duration::from_millis(300));
+
+    toggle_top_bar(&state);
+    toggle_sidebar(&state);
+    pump_for(std::time::Duration::from_millis(800));
+    snapshot_widget(&content, "tour-7-full-screen");
+    let _ = (limux_second, limux_pane);
     window.close();
 }
