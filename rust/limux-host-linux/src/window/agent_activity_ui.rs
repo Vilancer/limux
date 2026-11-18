@@ -57,19 +57,37 @@ pub(super) fn workspace_activity_counts(s: &AppState, workspace_id: &str) -> Act
     counts
 }
 
-/// Whether a project shows `●`: it is marked unread itself, or one of its
-/// tabs is unread and no longer working. A terminal that is still working
-/// keeps its spinner through a note (such as a background agent finishing);
-/// its `●` shows once it stops.
+/// Whether a project shows `●`: one of its tabs is unread and no longer
+/// working, or, with no unread tab, the project is marked unread itself. A
+/// terminal that is still working keeps its spinner through a note (such as a
+/// background agent finishing); its `●` shows once it stops. This is the
+/// Agents panel's rule, so the counter and the group counts agree.
 pub(super) fn has_finished_unread(
     s: &AppState,
     workspace_id: &str,
     workspace_unread: bool,
 ) -> bool {
-    workspace_unread
-        || pane::unread_tab_ids_in_workspace(workspace_id)
+    finished_unread(
+        workspace_unread,
+        pane::unread_tab_ids_in_workspace(workspace_id)
             .iter()
-            .any(|tab_id| s.agent_activity.phase(tab_id) != Some(AgentPhase::Working))
+            .map(|tab_id| s.agent_activity.phase(tab_id) == Some(AgentPhase::Working)),
+    )
+}
+
+/// `has_finished_unread` over the working flag of each unread tab.
+fn finished_unread(
+    workspace_unread: bool,
+    unread_tabs_working: impl Iterator<Item = bool>,
+) -> bool {
+    let mut any_unread_tab = false;
+    for working in unread_tabs_working {
+        if !working {
+            return true;
+        }
+        any_unread_tab = true;
+    }
+    workspace_unread && !any_unread_tab
 }
 
 /// Paint the row dot and the pill dot from the project signal.
@@ -1361,4 +1379,23 @@ pub(super) fn agent_activity_css() -> &'static str {
     color: @window_fg_color;
 }
 "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::finished_unread;
+
+    #[test]
+    fn a_project_note_does_not_hide_a_working_unread_terminal() {
+        // A project note alone shows `●`.
+        assert!(finished_unread(true, [].into_iter()));
+        // With an unread terminal still working, the project keeps its
+        // spinner, as the Agents panel counts it under Working.
+        assert!(!finished_unread(true, [true].into_iter()));
+        assert!(!finished_unread(false, [true].into_iter()));
+        // Once one unread terminal stops, the project shows `●`.
+        assert!(finished_unread(true, [true, false].into_iter()));
+        assert!(finished_unread(false, [false].into_iter()));
+        assert!(!finished_unread(false, [].into_iter()));
+    }
 }
