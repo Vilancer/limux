@@ -1924,7 +1924,8 @@ fn make_terminal_callbacks(
             let tab_state = Rc::downgrade(&internals.tab_state);
             let callbacks = internals.callbacks.clone();
             let tab_id = tab_id.to_string();
-            move |at, typed| {
+            move |at, input| {
+                let typed = input == crate::terminal::TerminalInput::Typed;
                 let Some(tab_state) = tab_state.upgrade() else {
                     return;
                 };
@@ -1938,7 +1939,7 @@ fn make_terminal_callbacks(
                     let Some(entry) = tab_state.find_tab_mut(&tab_id) else {
                         return;
                     };
-                    entry.activity.note_input(at);
+                    entry.activity.note_input(at, input);
                     typed && entry.unread && set_tab_unread(entry, false)
                 };
                 if cleared {

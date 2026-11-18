@@ -1415,6 +1415,60 @@ fn pending_panel_works_with_both_bars_hidden() {
     window.close();
 }
 
+// A shell that is slow to start (a system summary, a prompt that fills in
+// its git status) is not listed just for starting, as after a Limux restart.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn a_slow_shell_start_is_not_listed() {
+    // `sh` reads `$ENV` when it starts: print a few lines after 5 seconds.
+    let rc = std::env::temp_dir().join(format!("limux-slow-start-{}.sh", std::process::id()));
+    std::fs::write(
+        &rc,
+        "sleep 5; i=0; while [ $i -lt 3 ]; do echo slow-start$i; i=$((i+1)); sleep 0.3; done\n",
+    )
+    .unwrap();
+    std::env::set_var("ENV", &rc);
+    let (state, _temp) = pending_test_window("dev.limux.SlowStartTest");
+
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    let front = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    let back = pane::active_surface_summary(&pane).unwrap();
+    let (_, back_handle) = pane::terminal_tabs_in_pane(&pane)
+        .into_iter()
+        .find(|(tab_id, _)| *tab_id == back.tab_id)
+        .unwrap();
+    activate_desktop_notification_target(
+        &state,
+        &DesktopNotificationTarget {
+            workspace_id: ws_id.clone(),
+            pane_id: Some(front.pane_id),
+            tab_id: Some(front.tab_id.clone()),
+        },
+        None,
+    );
+    // Its start-up output, then the activity timeout to settle.
+    pump_for(std::time::Duration::from_secs(13));
+    std::env::remove_var("ENV");
+    let _ = std::fs::remove_file(&rc);
+    assert!(
+        back_handle
+            .read_viewport_text()
+            .is_some_and(|text| text.contains("slow-start2")),
+        "the shell printed after starting; screen: {:?}",
+        back_handle.read_viewport_text()
+    );
+    let phase = |tab_id: &str| state.borrow().agent_activity.phase(tab_id);
+    assert_eq!(phase(&back.tab_id), None, "starting is not activity");
+    assert_eq!(phase(&front.tab_id), None);
+    assert!(!pane::workspace_has_unread_tabs(&ws_id));
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
 // A plain terminal that prints on its own in a background tab is listed as
 // working, turns unread when it stops, keeps that mark through a visit until
 // the user types, then stays listed as quiet until it is closed. Ctrl+Alt+O
