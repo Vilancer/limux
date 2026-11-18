@@ -270,6 +270,9 @@ Launch Limux and verify:
 - `Ctrl+Alt+N` opens a second Limux instance
 - `Ctrl+Alt+K` clears terminal scrollback
 - `Ctrl+Alt+Shift+0` resets terminal font size
+- `Ctrl+Alt+P` opens the pending panel (check that the desktop does not bind
+  it first: KDE `~/.config/kglobalshortcutsrc`, GNOME
+  `gsettings list-recursively | grep -i '<Alt>p'`)
 
 ### 2. Remap One Shortcut
 
