@@ -165,6 +165,22 @@ fn prune_activity(state: &State) -> bool {
         .retain_tabs(|tab_id| tabs.get(tab_id) == Some(&false))
 }
 
+/// Settle agents that went quiet without a hook (interrupted, denied or
+/// killed). Returns whether any changed.
+fn settle_quiet_activity(state: &State) -> bool {
+    if state.borrow().agent_activity.is_empty() {
+        return false;
+    }
+    let now = crate::agent_activity::now_ms();
+    state
+        .borrow_mut()
+        .agent_activity
+        .settle_quiet(now, |tab_id| {
+            pane::terminal_silence(tab_id)
+                .map(|silent| u64::try_from(silent.as_millis()).unwrap_or(u64::MAX))
+        })
+}
+
 /// Repaint everything that reads agent state: project and pill signals, group
 /// headers and their waiting rows, and open session lists.
 pub(super) fn refresh_activity(state: &State) {
@@ -187,7 +203,8 @@ pub(super) fn install_activity_timer(state: &State) {
         let Some(state) = weak.upgrade() else {
             return glib::ControlFlow::Break;
         };
-        if prune_activity(&state) {
+        let settled = settle_quiet_activity(&state);
+        if prune_activity(&state) || settled {
             refresh_activity(&state);
         } else {
             // Titles change and tabs open and close: keep every session list

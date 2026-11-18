@@ -3274,6 +3274,20 @@ pub fn clear_all_tabs_unread_in_root(root: &gtk::Widget) -> bool {
     changed
 }
 
+/// How long a terminal tab has printed nothing, or `None` when the tab is
+/// gone or its output is not tracked.
+pub fn terminal_silence(tab_id: &str) -> Option<std::time::Duration> {
+    let internals = terminal_tab_owner(tab_id)?;
+    let tabs = internals.tab_state.borrow();
+    let entry = tabs.tabs.iter().find(|entry| entry.id == tab_id)?;
+    let TabKind::Terminal { state } = &entry.kind else {
+        return None;
+    };
+    entry
+        .activity
+        .silent_for(std::time::Instant::now(), state.spawned_at)
+}
+
 /// Like [`clear_all_tabs_unread_in_root`] for a list of panes, so panes a
 /// zoom keeps out of the root are cleared too.
 pub fn clear_all_tabs_unread_in_panes(panes: &[gtk::Widget]) -> bool {

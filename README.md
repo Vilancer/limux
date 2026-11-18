@@ -442,6 +442,11 @@ its hooks when a session starts, so restart running sessions afterwards.
 - Looking at a waiting terminal does not clear it; only the agent continuing
   does. Unread clears after a project has been on screen for about a second, so
   passing through projects with `Ctrl+Alt+PageDown` keeps their marks.
+- Claude Code sends no hook when you interrupt it with Esc, deny a permission
+  or kill it. A working or waiting terminal that has printed nothing for 10
+  seconds (Claude Code keeps redrawing while it works or waits) is therefore
+  shown as idle. This needs **Settings > General > Tab activity indicators** (on by
+  default), which tracks terminal output.
 - Agent state is live only: after a restart it comes back when the agent next
   reports. Other agents keep their notifications and show no live state yet.
 

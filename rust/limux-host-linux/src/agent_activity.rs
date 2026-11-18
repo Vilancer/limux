@@ -9,6 +9,12 @@
 
 use std::collections::HashMap;
 
+/// No hook reports an interrupted turn (Esc), a denied permission or a killed
+/// agent. While Claude Code works or waits it keeps redrawing (spinner, timer,
+/// the blinking bullet of a pending tool), so a working or waiting agent whose
+/// terminal has been silent this long is treated as idle.
+pub const QUIET_AFTER_MS: u64 = 10_000;
+
 /// What an agent in a terminal is doing, as its hooks last said.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentPhase {
@@ -130,6 +136,32 @@ impl ActivityStore {
 
     pub fn is_empty(&self) -> bool {
         self.surfaces.is_empty()
+    }
+
+    /// Settle working or waiting tabs that went quiet: no hook for
+    /// [`QUIET_AFTER_MS`] and no terminal output for as long. `silent_ms`
+    /// gives how long a tab's terminal has had no output, `None` when output
+    /// is not tracked (then the tab is left alone). Returns whether any
+    /// changed. A later hook still applies, as its time is newer.
+    pub fn settle_quiet(
+        &mut self,
+        now_ms: u64,
+        mut silent_ms: impl FnMut(&str) -> Option<u64>,
+    ) -> bool {
+        let mut changed = false;
+        for (tab_id, activity) in &mut self.surfaces {
+            if activity.phase == AgentPhase::Idle
+                || now_ms.saturating_sub(activity.at_ms) < QUIET_AFTER_MS
+            {
+                continue;
+            }
+            if silent_ms(tab_id).is_some_and(|silent| silent >= QUIET_AFTER_MS) {
+                activity.phase = AgentPhase::Idle;
+                activity.detail = None;
+                changed = true;
+            }
+        }
+        changed
     }
 }
 
@@ -474,5 +506,45 @@ mod tests {
             session_glyph(Some(AgentPhase::Idle), false).1,
             "waiting for a prompt"
         );
+    }
+
+    #[test]
+    fn quiet_working_or_waiting_agent_settles_to_idle() {
+        let mut store = ActivityStore::default();
+        for (tab, phase) in [
+            ("working", AgentPhase::Working),
+            ("approval", AgentPhase::NeedsApproval),
+            ("question", AgentPhase::NeedsInput),
+            ("idle", AgentPhase::Idle),
+            ("busy", AgentPhase::Working),
+            ("untracked", AgentPhase::Working),
+            ("fresh", AgentPhase::Working),
+        ] {
+            let at = if tab == "fresh" { 95_000 } else { 1_000 };
+            store.apply(event(tab, Some(phase), Some("s"), at));
+        }
+        let silent = |tab: &str| match tab {
+            "busy" => Some(300),
+            "untracked" => None,
+            _ => Some(QUIET_AFTER_MS),
+        };
+        assert!(store.settle_quiet(100_000, silent));
+        for tab in ["working", "approval", "question", "idle"] {
+            assert_eq!(store.phase(tab), Some(AgentPhase::Idle), "{tab}");
+        }
+        // Still drawing, output not tracked, or a hook less than 10 s ago.
+        for tab in ["busy", "untracked", "fresh"] {
+            assert_eq!(store.phase(tab), Some(AgentPhase::Working), "{tab}");
+        }
+        assert!(!store.settle_quiet(100_000, silent));
+    }
+
+    #[test]
+    fn a_hook_after_settling_still_applies() {
+        let mut store = ActivityStore::default();
+        store.apply(event("t", Some(AgentPhase::Working), Some("s"), 1_000));
+        assert!(store.settle_quiet(20_000, |_| Some(15_000)));
+        assert!(store.apply(event("t", Some(AgentPhase::Working), Some("s"), 21_000)));
+        assert_eq!(store.phase("t"), Some(AgentPhase::Working));
     }
 }

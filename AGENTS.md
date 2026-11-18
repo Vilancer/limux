@@ -125,6 +125,22 @@ The CLI surface lives in `rust/limux-cli/src/main.rs`:
 - `run_agent_team` splits the current workspace and launches peers.
 - `build_agents_md` writes the generated runtime protocol file.
 
+Live agent state: `limux --json hooks claude <event>` maps Claude Code hook
+events to the host-only `agent.activity` method
+(`agent_activity_state`, `agent_activity_params`). Params:
+
+- `surface_id` (required): the terminal, from `LIMUX_SURFACE_ID`.
+- `state` (required): `working`, `needs_approval`, `needs_input`, `idle` or
+  `ended`.
+- `agent`, `session_id`, `at_ms` (Unix ms when the hook ran; an older event
+  than the tab's last one is dropped) and `detail` (one line such as
+  `Bash: cargo test`).
+
+The host keeps it per tab in `agent_activity.rs` (pure, table-tested). No hook
+reports an Esc interrupt, a denied permission or a killed agent, so a working
+or waiting tab whose terminal printed nothing for 10 s settles to idle; this
+needs the tab activity setting, which tracks PTY output.
+
 Keep `limux agent-team --dry-run` working without a host. For live behavior,
 the headless Weston smoke script exercises terminal surface health, input and
 screen readback, bridge routing, generated `AGENTS.md`, and session restart.

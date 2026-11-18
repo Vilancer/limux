@@ -14,6 +14,8 @@ pub(crate) struct TabActivity(Rc<ActivityState>);
 struct ActivityState {
     spinner: gtk::Spinner,
     last_output: Cell<Option<Instant>>,
+    /// Any output, seen or not, for telling a quiet agent from a busy one.
+    last_any_output: Cell<Option<Instant>>,
     acknowledged_through: Cell<Instant>,
     mapped: Cell<bool>,
     unread: Cell<bool>,
@@ -37,6 +39,7 @@ impl TabActivity {
         Self(Rc::new(ActivityState {
             spinner,
             last_output: Cell::new(None),
+            last_any_output: Cell::new(None),
             acknowledged_through: Cell::new(Instant::now()),
             mapped: Cell::new(false),
             unread: Cell::new(false),
@@ -86,6 +89,9 @@ impl TabActivity {
     }
 
     pub(crate) fn record_output(&self, at: Instant) {
+        if self.0.last_any_output.get().is_none_or(|last| at > last) {
+            self.0.last_any_output.set(Some(at));
+        }
         if self.0.enabled.get()
             && !self.0.mapped.get()
             && !self.0.unread.get()
@@ -94,6 +100,17 @@ impl TabActivity {
             self.0.last_output.set(Some(at));
             self.sync();
         }
+    }
+
+    /// How long the terminal has had no output, or `None` when output is not
+    /// tracked (the tab activity setting is off). Counts from `since` (the
+    /// terminal's start) when it never printed.
+    pub(crate) fn silent_for(&self, now: Instant, since: Instant) -> Option<Duration> {
+        if !self.0.enabled.get() {
+            return None;
+        }
+        let last = self.0.last_any_output.get().unwrap_or(since);
+        Some(now.saturating_duration_since(last))
     }
 
     pub(crate) fn configure(&self, config: &InterfaceConfig) {
