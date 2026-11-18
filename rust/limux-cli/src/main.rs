@@ -2083,7 +2083,7 @@ fn install_json_hooks(
             "hooks": [{
                 "type": "command",
                 "command": hook_command(agent, limux_event, osc)?,
-                "statusMessage": format!("Limux {} session restore", agent.label()),
+                "statusMessage": hook_status_message(agent, limux_event),
                 "timeout": hook_timeout(agent)
             }]
         });
@@ -2094,6 +2094,16 @@ fn install_json_hooks(
     }
 
     write_json_object(path, &root)
+}
+
+/// What the agent shows while the hook runs. The per-tool hook only reports
+/// activity, so it does not claim to restore the session.
+fn hook_status_message(agent: agent_hooks::AgentKind, limux_event: &str) -> String {
+    if limux_event == "post-tool-use" {
+        format!("Limux {} activity", agent.label())
+    } else {
+        format!("Limux {} session restore", agent.label())
+    }
 }
 
 fn hook_timeout(agent: agent_hooks::AgentKind) -> u64 {
@@ -5295,6 +5305,10 @@ mod cli_arg_tests {
             .as_str()
             .expect("command")
             .contains("hooks claude post-tool-use"));
+        assert_eq!(
+            root["hooks"]["PostToolUse"][0]["hooks"][0]["statusMessage"],
+            "Limux Claude activity"
+        );
     }
 
     #[test]
