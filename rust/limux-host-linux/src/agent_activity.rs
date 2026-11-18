@@ -378,8 +378,9 @@ pub fn session_glyph(phase: Option<AgentPhase>, unread: bool) -> (&'static str, 
     match phase {
         Some(AgentPhase::NeedsApproval) => (GLYPH_WAITING, "needs approval"),
         Some(AgentPhase::NeedsInput) => (GLYPH_WAITING, "needs input"),
-        _ if unread => (GLYPH_UNREAD, "unread"),
+        // Still working: the unread mark shows once it stops.
         Some(AgentPhase::Working) => (GLYPH_WORKING, "working"),
+        _ if unread => (GLYPH_UNREAD, "unread"),
         Some(AgentPhase::Idle) => (GLYPH_IDLE, "waiting for a prompt"),
         None => (GLYPH_SHELL, "terminal"),
     }
@@ -649,15 +650,17 @@ mod tests {
     }
 
     #[test]
-    fn session_glyphs_put_waiting_over_unread_over_working() {
+    fn session_glyphs_put_waiting_over_working_over_unread() {
         assert_eq!(
             session_glyph(Some(AgentPhase::NeedsApproval), true).0,
             GLYPH_WAITING
         );
+        // A note that came while it works waits until it stops.
         assert_eq!(
             session_glyph(Some(AgentPhase::Working), true).0,
-            GLYPH_UNREAD
+            GLYPH_WORKING
         );
+        assert_eq!(session_glyph(Some(AgentPhase::Idle), true).0, GLYPH_UNREAD);
         assert_eq!(
             session_glyph(Some(AgentPhase::Working), false).0,
             GLYPH_WORKING

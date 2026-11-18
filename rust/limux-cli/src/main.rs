@@ -1101,6 +1101,21 @@ async fn run_agent_hook(
     let agent_label = agent.label();
     persist_agent_hook_session(agent, args, &payload, &event)?;
     let notification_title_body = match event.as_str() {
+        // A background agent finishing, or a message Claude sends on its
+        // own, does not ask for anything.
+        "Notification" | "notification"
+            if matches!(
+                hook_str(&payload, &["notification_type", "notificationType"]),
+                Some("agent_completed" | "push_notification")
+            ) =>
+        {
+            Some((
+                agent_label.to_string(),
+                hook_str(&payload, &["message", "notification"])
+                    .unwrap_or("update")
+                    .to_owned(),
+            ))
+        }
         "Notification" | "notification" => Some((
             format!("{agent_label} needs you"),
             hook_str(&payload, &["message", "notification"])
@@ -1195,10 +1210,15 @@ fn agent_activity_state(
 
 /// Claude Code sends one Notification hook for several reasons. Newer
 /// versions name it in `notification_type`; older ones only in the message.
+/// A background agent or worker of the session asking for permission or
+/// input needs the user in this terminal too. Others (a background agent
+/// finished, a message Claude chose to send) leave the state as it is.
 fn claude_notification_state(payload: &Value) -> Option<&'static str> {
     match hook_str(payload, &["notification_type", "notificationType"]) {
-        Some("permission_prompt") => return Some("needs_approval"),
-        Some("elicitation_dialog") => return Some("needs_input"),
+        Some("permission_prompt" | "worker_permission_prompt") => return Some("needs_approval"),
+        Some("elicitation_dialog" | "elicitation_url_dialog" | "agent_needs_input") => {
+            return Some("needs_input")
+        }
         Some("idle_prompt") => return Some("idle"),
         Some(_) => return None,
         None => {}
@@ -5178,6 +5198,38 @@ mod cli_arg_tests {
             (
                 "notification",
                 json!({"hook_event_name": "Notification", "notification_type": "auth_success"}),
+                None,
+            ),
+            // Claude Code 2.1.3xx: background agents and workers.
+            (
+                "notification",
+                json!({"hook_event_name": "Notification",
+                       "notification_type": "worker_permission_prompt",
+                       "message": "builder needs permission for Bash"}),
+                Some("needs_approval"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "agent_needs_input",
+                       "message": "ca842437 needs your input"}),
+                Some("needs_input"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification",
+                       "notification_type": "elicitation_url_dialog"}),
+                Some("needs_input"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "agent_completed",
+                       "message": "ca842437 finished"}),
+                None,
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "push_notification",
+                       "message": "Build is green"}),
                 None,
             ),
             // Older Claude Code: no type, only the message.

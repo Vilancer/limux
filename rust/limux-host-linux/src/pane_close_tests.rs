@@ -1785,6 +1785,70 @@ fn group_counts_and_overflow_reach_the_right_terminal() {
     window.close();
 }
 
+// A note that arrives while the agent works (a background agent finished)
+// does not stop the spinner: the project keeps showing working, and its `●`
+// shows once the agent stops.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn a_note_while_working_keeps_the_spinner_until_it_stops() {
+    use crate::agent_activity::AgentPhase::{Idle, Working};
+    let (state, _temp) = pending_test_window("dev.limux.NoteWhileWorkingTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (home_id, _) = add_named_workspace(&state, "home");
+    let (ws_id, pane) = add_named_workspace(&state, "AyahLoop");
+    let tab = pane::active_surface_summary(&pane).unwrap();
+    let index = state
+        .borrow()
+        .workspaces
+        .iter()
+        .position(|w| w.id == home_id)
+        .unwrap();
+    select_workspace_by_index(&state, index);
+    pump_for(std::time::Duration::from_millis(300));
+
+    report(&state, &ws_id, &tab.tab_id, Working, "Poll");
+    mark_workspace_unread_with_message(
+        &state,
+        &ws_id,
+        "Claude: ca842437 finished",
+        false,
+        DesktopNotificationTarget {
+            workspace_id: ws_id.clone(),
+            pane_id: Some(tab.pane_id),
+            tab_id: Some(tab.tab_id.clone()),
+        },
+    );
+    pump_for(std::time::Duration::from_millis(300));
+    let (spinner, dot) = {
+        let s = state.borrow();
+        let workspace = s.workspaces.iter().find(|w| w.id == ws_id).unwrap();
+        (
+            workspace.row_extras.spinner.clone(),
+            workspace.notify_dot.clone(),
+        )
+    };
+    assert!(pane::workspace_has_unread_tabs(&ws_id), "the note is kept");
+    assert!(spinner.is_visible(), "the row keeps its spinner");
+    assert!(!dot.is_visible(), "no dot while it works");
+    assert_eq!(
+        pending_panel::counter_text(&state),
+        format!("{} 1", crate::agent_activity::GLYPH_WORKING)
+    );
+
+    report(&state, &ws_id, &tab.tab_id, Idle, "");
+    pump_until(wait, || dot.is_visible());
+    assert!(
+        dot.is_visible(),
+        "once it stops, the note shows as finished"
+    );
+    assert!(!spinner.is_visible());
+    assert_eq!(pending_panel::counter_text(&state), "\u{25CF} 1");
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
 // Not a check: builds a realistic sidebar (two groups, one collapsed, agents
 // working, waiting and finished) and saves pictures of each view for a UX
 // review. Run with LIMUX_TEST_SNAPSHOT_DIR set.

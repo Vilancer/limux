@@ -431,7 +431,9 @@ unread colour is set to rose. The sign always sits in the same column, on
 project rows and on terminal tabs.
 
 - A project row and its top-bar pill show one sign: waiting over unread over
-  working. The pill shows only waiting and unread. The row also says how long
+  working. A terminal that is still working keeps its spinner when a note
+  arrives (a background agent finishing, for example); its `●` shows once it
+  stops. The pill shows only waiting and unread. The row also says how long
   that state has lasted (`3m`).
 - A group header shows `◆ N` waiting terminals, `● N` unread projects and
   working terminals, on the right, also when the group is collapsed. Clicking a
@@ -476,7 +478,9 @@ project rows and on terminal tabs.
   paste into that terminal (or with **Mark as Read** or **Mark all read**), so
   glancing at it and switching away keeps it. Waiting clears only when the
   agent continues.
-- Claude Code sends no hook when you interrupt it with Esc, deny a permission
+- Claude Code notifications from background agents and workers count too: one
+  that asks for permission or input shows `◆`, one that finished is only a
+  note. Claude Code sends no hook when you interrupt it with Esc, deny a permission
   or kill it. A working terminal that has printed nothing for 10 seconds
   (Claude Code keeps redrawing while it works or waits) is therefore shown as
   idle. A waiting one only if you have had it on screen since it asked, so a

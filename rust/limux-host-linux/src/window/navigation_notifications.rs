@@ -500,12 +500,15 @@ pub(super) fn has_unread(workspace_unread: bool, tab_unread: bool) -> bool {
 
 /// Paint unread on a project row and pill. The row dot and pill dot show the
 /// project signal (waiting, unread or working), painted with it.
+/// `unread` keeps the message line; `finished` (unread and not working, see
+/// `agent_activity_ui::has_finished_unread`) decides the sign.
 pub(super) fn set_workspace_unread_visual(
     workspace: &Workspace,
     unread: bool,
+    finished: bool,
     counts: crate::agent_activity::ActivityCounts,
 ) {
-    let signal = crate::agent_activity::ProjectSignal::of(counts, unread);
+    let signal = crate::agent_activity::ProjectSignal::of(counts, finished);
     agent_activity_ui::set_workspace_signal_visual(workspace, signal, counts);
     let attention = signal.needs_attention();
     if attention {
@@ -578,9 +581,11 @@ pub(super) fn paint_workspace_unread(state: &State, ws_id: &str) {
         let s = state.borrow();
         if let Some(workspace) = s.workspaces.iter().find(|workspace| workspace.id == ws_id) {
             let counts = agent_activity_ui::workspace_activity_counts(&s, ws_id);
+            let finished = agent_activity_ui::has_finished_unread(&s, ws_id, workspace_unread);
             set_workspace_unread_visual(
                 workspace,
                 has_unread(workspace_unread, tab_unread),
+                finished,
                 counts,
             );
         }

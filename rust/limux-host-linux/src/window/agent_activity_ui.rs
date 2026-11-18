@@ -57,6 +57,21 @@ pub(super) fn workspace_activity_counts(s: &AppState, workspace_id: &str) -> Act
     counts
 }
 
+/// Whether a project shows `●`: it is marked unread itself, or one of its
+/// tabs is unread and no longer working. A terminal that is still working
+/// keeps its spinner through a note (such as a background agent finishing);
+/// its `●` shows once it stops.
+pub(super) fn has_finished_unread(
+    s: &AppState,
+    workspace_id: &str,
+    workspace_unread: bool,
+) -> bool {
+    workspace_unread
+        || pane::unread_tab_ids_in_workspace(workspace_id)
+            .iter()
+            .any(|tab_id| s.agent_activity.phase(tab_id) != Some(AgentPhase::Working))
+}
+
 /// Paint the row dot and the pill dot from the project signal.
 pub(super) fn set_workspace_signal_visual(
     workspace: &Workspace,

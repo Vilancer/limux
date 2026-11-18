@@ -327,9 +327,11 @@ fn group_activity(s: &AppState) -> GroupActivity {
         .workspaces
         .iter()
         .filter(|workspace| {
-            workspace.unread
-                || workspace.manual_unread
-                || pane::workspace_has_unread_tabs(&workspace.id)
+            agent_activity_ui::has_finished_unread(
+                s,
+                &workspace.id,
+                workspace.unread || workspace.manual_unread,
+            )
         })
         .map(|workspace| workspace.id.as_str())
         .collect();

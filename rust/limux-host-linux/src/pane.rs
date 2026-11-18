@@ -3495,6 +3495,23 @@ pub fn mark_active_tab_manual_unread_in_root(root: &gtk::Widget) -> bool {
     changed
 }
 
+/// The unread tabs of a workspace, of every kind.
+pub fn unread_tab_ids_in_workspace(workspace_id: &str) -> Vec<String> {
+    pane_internals_for_workspace(workspace_id)
+        .into_iter()
+        .flat_map(|internals| {
+            internals
+                .tab_state
+                .borrow()
+                .tabs
+                .iter()
+                .filter(|entry| entry.unread)
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 pub fn workspace_has_unread_tabs(workspace_id: &str) -> bool {
     pane_internals_for_workspace(workspace_id)
         .into_iter()

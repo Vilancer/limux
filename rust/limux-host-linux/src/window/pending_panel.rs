@@ -143,7 +143,8 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                         activity.map_or(0, |activity| activity.since_ms),
                         message,
                     )
-                } else if working && !tab.unread {
+                } else if working {
+                    // Still working: a note it got shows once it stops.
                     (
                         PendingKind::Working,
                         activity.map_or(0, |activity| activity.since_ms),
