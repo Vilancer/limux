@@ -121,6 +121,7 @@ pub fn ui_scale_css(config: &AppConfig) -> String {
          .limux-ws-group-needs-you, .limux-pending-glyph-waiting, \
          .limux-pending-count-waiting {{ color: {w}; }}\n\
          .limux-session-glyph.limux-session-unread {{ color: {c}; }}\n\
+         .limux-notify-dot.limux-notify-dot-quiet {{ color: alpha(@window_fg_color, 0.45); }}\n\
          .limux-session-glyph.limux-session-waiting {{ color: {w}; }}\n\
          .limux-pending-counter-waiting {{ background: alpha({w}, 0.16); \
          box-shadow: inset 0 0 0 1px {w}; }}\n\

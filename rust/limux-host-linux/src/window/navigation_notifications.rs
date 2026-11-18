@@ -570,47 +570,6 @@ pub(super) fn paint_workspace_unread(state: &State, ws_id: &str) {
     agent_activity_ui::refresh_session_rows(state, ws_id, false);
 }
 
-pub(super) fn clear_visible_tab_unread(state: &State, ws_id: &str) {
-    let root = {
-        let mut s = state.borrow_mut();
-        if !s.window.is_active() {
-            return;
-        }
-        let Some(workspace) = s
-            .workspaces
-            .iter_mut()
-            .find(|workspace| workspace.id == ws_id)
-        else {
-            return;
-        };
-        workspace.unread = false;
-        workspace.manual_unread = false;
-        workspace.root.clone()
-    };
-    pane::clear_active_tab_unread_in_root(&root);
-    sync_workspace_unread(state, ws_id);
-}
-
-pub(super) fn clear_visible_tab_unread_on_window_focus(state: &State, ws_id: &str) {
-    let root = {
-        let mut s = state.borrow_mut();
-        if !s.window.is_active() {
-            return;
-        }
-        let Some(workspace) = s
-            .workspaces
-            .iter_mut()
-            .find(|workspace| workspace.id == ws_id)
-        else {
-            return;
-        };
-        workspace.unread = false;
-        workspace.root.clone()
-    };
-    pane::clear_active_tab_unread_in_root_if_not_manual(&root);
-    sync_workspace_unread(state, ws_id);
-}
-
 pub(super) fn mark_workspace_unread(
     state: &State,
     ws_id: &str,

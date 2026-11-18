@@ -1,6 +1,6 @@
 //! Live agent state in the window: the `agent.activity` control method, the
 //! one signal each project row and top-bar pill shows, the expandable
-//! session rows under a project, and the unread dwell.
+//! session rows under a project, and the terminals kept in them.
 //!
 //! The rules live in `crate::agent_activity`; this module only reads panes,
 //! applies events to `AppState::agent_activity` and paints widgets.
@@ -11,9 +11,6 @@ use crate::agent_activity::{
     GLYPH_WORKING,
 };
 
-/// How long a project must stay on screen before its unread marks clear, so
-/// passing through projects (`Ctrl+Alt+PageDown`) does not wipe them.
-const UNREAD_DWELL: std::time::Duration = std::time::Duration::from_millis(1000);
 /// How often closed terminals are pruned and open session lists refreshed.
 const ACTIVITY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -39,7 +36,8 @@ pub(super) struct SessionRowView {
     detail: Option<String>,
     /// When its current state began (Unix ms), for the age.
     since_ms: u64,
-    /// Working, waiting or unread: shown even while the list is closed.
+    /// Did something (working, waiting, unread, idle after work, exited):
+    /// shown even while the list is closed, until the user closes it.
     active: bool,
 }
 
@@ -72,6 +70,7 @@ pub(super) fn set_workspace_signal_visual(
         "limux-notify-dot-waiting",
         "limux-notify-dot-working",
         "limux-notify-dot-exited",
+        "limux-notify-dot-quiet",
     ] {
         dot.remove_css_class(class);
     }
@@ -112,6 +111,16 @@ pub(super) fn set_workspace_signal_visual(
             GLYPH_WORKING,
             &["limux-notify-dot-hidden"],
             agent_activity::counts_summary(counts),
+        ),
+        // Terminals that did something and are quiet now: a faint ring.
+        ProjectSignal::None if counts.quiet > 0 => (
+            agent_activity::GLYPH_IDLE,
+            &["limux-notify-dot", "limux-notify-dot-quiet"],
+            Some(format!(
+                "{} quiet terminal{}",
+                counts.quiet,
+                if counts.quiet == 1 { "" } else { "s" }
+            )),
         ),
         ProjectSignal::None => (GLYPH_UNREAD, &["limux-notify-dot-hidden"], None),
     };
@@ -285,9 +294,77 @@ fn settle_quiet_activity(state: &State) -> bool {
     )
 }
 
-/// Remember that the tabs on screen (the active tab of each shown pane of the
-/// shown project, in an active window) were seen now. Closed tabs are dropped.
-fn note_seen_tabs(state: &State, now: u64) {
+/// Follow plain terminals from their own output (see
+/// [`agent_activity::ActivityStore::track_terminal`]) and keep unread ones
+/// listed. One that stops printing while off screen turns unread, like an
+/// agent that finished. Returns whether anything changed.
+fn track_terminals(state: &State) -> bool {
+    let now = std::time::Instant::now();
+    let now_ms = agent_activity::now_ms();
+    let shown: HashSet<String> = shown_tab_ids(state).into_iter().collect();
+    let ids: Vec<String> = state
+        .borrow()
+        .workspaces
+        .iter()
+        .map(|workspace| workspace.id.clone())
+        .collect();
+    let mut changed = false;
+    let mut finished = Vec::new();
+    for workspace_id in ids {
+        for terminal in pane::terminal_output_states(&workspace_id, now) {
+            let since = terminal.working_since.map(|at| {
+                let ago = u64::try_from(now.saturating_duration_since(at).as_millis())
+                    .unwrap_or(u64::MAX);
+                now_ms.saturating_sub(ago)
+            });
+            let mut s = state.borrow_mut();
+            match s
+                .agent_activity
+                .track_terminal(&terminal.tab_id, now_ms, since)
+            {
+                agent_activity::TerminalChange::None => {}
+                agent_activity::TerminalChange::Started => changed = true,
+                agent_activity::TerminalChange::Finished => {
+                    changed = true;
+                    if !shown.contains(&terminal.tab_id) {
+                        finished.push((workspace_id.clone(), terminal.pane_id, terminal.tab_id));
+                        continue;
+                    }
+                }
+            }
+            if terminal.unread {
+                changed |= s.agent_activity.keep(&terminal.tab_id, now_ms);
+            }
+        }
+    }
+    for (workspace_id, pane_id, tab_id) in finished {
+        if pane::mark_tab_unread_in_workspace(&workspace_id, pane_id, &tab_id) == Some(true) {
+            pending_panel::note_message(
+                &mut state.borrow_mut(),
+                &workspace_id,
+                Some(&tab_id),
+                "Finished",
+            );
+        }
+    }
+    changed
+}
+
+/// Close a kept terminal's entry: mark it read and drop it from the lists
+/// until it does something again. Working and waiting ones stay.
+pub(super) fn dismiss_terminal(state: &State, tab_id: &str) {
+    let dropped = state.borrow_mut().agent_activity.dismiss(tab_id);
+    if !dropped && state.borrow().agent_activity.get(tab_id).is_some() {
+        return;
+    }
+    pane::clear_tab_unread_by_id(tab_id);
+    state.borrow_mut().tab_notes.remove(tab_id);
+    refresh_activity(state);
+}
+
+/// The tabs on screen: the active tab of each shown pane of the shown
+/// project, in an active window.
+fn shown_tab_ids(state: &State) -> Vec<String> {
     let root = {
         let s = state.borrow();
         if !s.window.is_active() {
@@ -307,6 +384,12 @@ fn note_seen_tabs(state: &State, now: u64) {
                 .map(|surface| surface.tab_id),
         );
     }
+    shown
+}
+
+/// Remember that the tabs on screen were seen now. Closed tabs are dropped.
+fn note_seen_tabs(state: &State, now: u64) {
+    let shown = shown_tab_ids(state);
     let mut s = state.borrow_mut();
     let AppState {
         agent_activity,
@@ -344,7 +427,11 @@ fn sync_tab_signs(state: &State) {
     for workspace in &s.workspaces {
         let mut seen: HashMap<String, usize> = HashMap::new();
         for tab_id in pane::terminal_tab_ids_in_workspace(&workspace.id) {
-            let Some(activity) = s.agent_activity.get(&tab_id) else {
+            let Some(activity) = s
+                .agent_activity
+                .get(&tab_id)
+                .filter(|activity| activity.agent != agent_activity::TERMINAL_AGENT)
+            else {
                 continue;
             };
             let label = agent_label(&activity.agent);
@@ -359,7 +446,11 @@ fn sync_tab_signs(state: &State) {
         }
     }
     pane::sync_tab_agent_signs(|tab_id| {
-        let activity = s.agent_activity.get(tab_id)?;
+        // A plain terminal's tab already has its output spinner.
+        let activity = s
+            .agent_activity
+            .get(tab_id)
+            .filter(|activity| activity.agent != agent_activity::TERMINAL_AGENT)?;
         let (waiting, working, tooltip) = match activity.phase {
             AgentPhase::NeedsApproval => (true, false, "Needs your approval"),
             AgentPhase::NeedsInput => (true, false, "Has a question for you"),
@@ -427,8 +518,9 @@ pub(super) fn install_activity_timer(state: &State) {
         let Some(state) = weak.upgrade() else {
             return glib::ControlFlow::Break;
         };
+        let tracked = track_terminals(&state);
         let settled = settle_quiet_activity(&state);
-        if prune_activity(&state) || settled {
+        if prune_activity(&state) || settled || tracked {
             refresh_activity(&state);
         } else {
             // Tab switches move the detail between tabs.
@@ -447,37 +539,6 @@ pub(super) fn install_activity_timer(state: &State) {
             }
         }
         glib::ControlFlow::Continue
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Unread dwell
-// ---------------------------------------------------------------------------
-
-/// Clear the shown project's unread marks once it has stayed on screen for
-/// `UNREAD_DWELL`, in an active window. Every visible pane counts, not only
-/// the focused one. A newer switch cancels the pending clear.
-pub(super) fn schedule_unread_clear(state: &State, workspace_id: &str) {
-    let epoch = {
-        let mut s = state.borrow_mut();
-        s.unread_dwell_epoch = s.unread_dwell_epoch.wrapping_add(1);
-        s.unread_dwell_epoch
-    };
-    let weak = Rc::downgrade(state);
-    let workspace_id = workspace_id.to_string();
-    glib::timeout_add_local_once(UNREAD_DWELL, move || {
-        let Some(state) = weak.upgrade() else {
-            return;
-        };
-        let still_shown = {
-            let s = state.borrow();
-            s.unread_dwell_epoch == epoch
-                && s.active_workspace()
-                    .is_some_and(|workspace| workspace.id == workspace_id)
-        };
-        if still_shown {
-            clear_visible_tab_unread(&state, &workspace_id);
-        }
     });
 }
 
@@ -510,15 +571,20 @@ fn session_row_views(s: &AppState, panes: &[gtk::Widget], all: bool) -> Vec<Sess
         }
         for (index, tab) in tabs.into_iter().enumerate() {
             let activity = s.agent_activity.get(&tab.tab_id);
+            let plain = activity.is_some_and(|a| a.agent == agent_activity::TERMINAL_AGENT);
             let (glyph, state_label) = if tab.exited {
                 (GLYPH_EXITED, "exited")
             } else {
-                agent_activity::session_glyph(activity.map(|a| a.phase), tab.unread)
+                match agent_activity::session_glyph(activity.map(|a| a.phase), tab.unread) {
+                    (glyph, "waiting for a prompt") if plain => (glyph, "quiet"),
+                    other => other,
+                }
             };
             let phase = activity.map(|activity| activity.phase);
             let waiting = phase.is_some_and(AgentPhase::is_waiting);
             let working = phase == Some(AgentPhase::Working);
-            let active = waiting || working || tab.unread;
+            // Anything that did something stays listed until it is closed.
+            let active = activity.is_some() || tab.unread || tab.exited;
             if !all && !active {
                 continue;
             }
@@ -527,17 +593,16 @@ fn session_row_views(s: &AppState, panes: &[gtk::Widget], all: bool) -> Vec<Sess
                 activity
                     .and_then(|activity| activity.detail.clone())
                     .or_else(|| note.map(|(text, _)| text.clone()))
-            } else if tab.unread {
+            } else if tab.unread || activity.is_some() {
+                // What it last said, so a quiet one is still recognisable.
                 note.map(|(text, _)| text.clone())
             } else {
                 None
             };
-            let since_ms = if waiting || working {
-                activity.map_or(0, |activity| activity.since_ms)
-            } else if tab.unread {
+            let since_ms = if tab.unread && !waiting && !working {
                 note.map_or(0, |(_, at)| *at)
             } else {
-                0
+                activity.map_or(0, |activity| activity.since_ms)
             };
             views.push(SessionRowView {
                 pane_id,
@@ -548,7 +613,9 @@ fn session_row_views(s: &AppState, panes: &[gtk::Widget], all: bool) -> Vec<Sess
                 shown: all && tab.active,
                 glyph,
                 state_label,
-                agent: activity.map(|activity| agent_label(&activity.agent)),
+                agent: activity
+                    .filter(|_| !plain)
+                    .map(|activity| agent_label(&activity.agent)),
                 detail,
                 since_ms,
                 active,
@@ -582,6 +649,38 @@ fn lead_view(views: &[SessionRowView]) -> Option<&SessionRowView> {
         .iter()
         .filter(|view| view.active)
         .min_by_key(|view| urgency(view))
+}
+
+/// Finished or quiet terminals can be closed from the list; working, waiting
+/// and exited ones say what is going on (an exited one closes in its pane).
+fn is_closable_label(state_label: &str) -> bool {
+    matches!(state_label, "unread" | "waiting for a prompt" | "quiet")
+}
+
+/// The ✕ at the end of a closable chip. A click on it closes the entry
+/// instead of opening the terminal.
+fn close_mark(state: &State, tab_id: &str) -> gtk::Label {
+    let mark = gtk::Label::new(Some(GLYPH_EXITED));
+    mark.add_css_class("limux-session-close");
+    mark.set_tooltip_text(Some("Close from the list (Delete)"));
+    let click = gtk::GestureClick::new();
+    click.set_button(gtk::gdk::BUTTON_PRIMARY);
+    click.connect_pressed(|gesture, _, _, _| {
+        // Keep the chip from opening the terminal.
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+    {
+        let state = state.clone();
+        let tab_id = tab_id.to_string();
+        click.connect_released(move |_, _, _, _| {
+            let state = state.clone();
+            let tab_id = tab_id.clone();
+            // The chip goes away with it: rebuild after this event.
+            glib::idle_add_local_once(move || dismiss_terminal(&state, &tab_id));
+        });
+    }
+    mark.add_controller(click);
+    mark
 }
 
 fn is_waiting_label(state_label: &str) -> bool {
@@ -928,7 +1027,8 @@ fn build_session_row(
             "needs approval" | "needs input" => glyph.add_css_class("limux-session-waiting"),
             "unread" => glyph.add_css_class("limux-session-unread"),
             "exited" => glyph.add_css_class("limux-session-exited"),
-            // Nothing to act on: no sign.
+            "waiting for a prompt" | "quiet" => glyph.add_css_class("limux-session-quiet"),
+            // A terminal that never did anything: no sign.
             _ => glyph.set_visible(false),
         }
         gutter.append(&glyph);
@@ -951,6 +1051,10 @@ fn build_session_row(
     let age = gtk::Label::new(Some(&agent_activity::ago_label(now, view.since_ms)));
     age.add_css_class("limux-session-age");
     content.append(&age);
+    let closable = is_closable_label(view.state_label);
+    if closable {
+        content.append(&close_mark(state, &view.tab_id));
+    }
 
     let body = gtk::Box::new(gtk::Orientation::Vertical, 1);
     body.append(&content);
@@ -978,7 +1082,10 @@ fn build_session_row(
     if waiting {
         button.add_css_class("limux-session-row-waiting");
     }
-    if view.state_label == "waiting for a prompt" || view.state_label == "terminal" {
+    if matches!(
+        view.state_label,
+        "waiting for a prompt" | "quiet" | "terminal"
+    ) {
         button.add_css_class("limux-session-row-quiet");
     }
     if view.background {
@@ -996,6 +1103,20 @@ fn build_session_row(
     }
     button.set_tooltip_text(Some(&spoken));
     button.update_property(&[gtk::accessible::Property::Label(&spoken)]);
+
+    if closable {
+        let keys = gtk::EventControllerKey::new();
+        let state = state.clone();
+        let tab_id = view.tab_id.clone();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if matches!(key, gtk::gdk::Key::Delete | gtk::gdk::Key::KP_Delete) {
+                dismiss_terminal(&state, &tab_id);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        button.add_controller(keys);
+    }
 
     let pane_id = view.pane_id;
     let motion = gtk::EventControllerMotion::new();
@@ -1143,6 +1264,21 @@ pub(super) fn agent_activity_css() -> &'static str {
 }
 .limux-session-exited {
     font-weight: 700;
+}
+/* Did something earlier and is quiet now: kept until closed. */
+.limux-session-glyph.limux-session-quiet {
+    color: alpha(@window_fg_color, 0.45);
+}
+.limux-session-close {
+    margin-left: 6px;
+    padding: 0 3px;
+    border-radius: 4px;
+    font-size: 10px;
+    color: alpha(@window_fg_color, 0.45);
+}
+.limux-session-close:hover {
+    color: @window_fg_color;
+    background: alpha(@window_fg_color, 0.15);
 }
 .limux-session-detail {
     font-size: 12px;

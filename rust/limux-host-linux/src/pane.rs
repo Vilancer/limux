@@ -814,12 +814,6 @@ pub fn cycle_tab_in_pane(pane_widget: &gtk::Widget, delta: i32) {
         &internals.tab_state,
         &new_id,
     );
-    clear_tab_unread_if_visible(
-        &internals.tab_state,
-        &new_id,
-        &internals.pane_outer.clone().upcast(),
-        &internals.callbacks,
-    );
     (internals.callbacks.on_state_changed)();
 }
 
@@ -845,12 +839,6 @@ pub fn focus_active_tab_in_pane(pane_widget: &gtk::Widget) -> bool {
         &internals.content_stack,
         &internals.tab_state,
         &tab_id,
-    );
-    clear_tab_unread_if_visible_and_not_manual(
-        &internals.tab_state,
-        &tab_id,
-        &internals.pane_outer.clone().upcast(),
-        &internals.callbacks,
     );
     true
 }
@@ -1232,12 +1220,6 @@ pub fn activate_tab_in_pane(pane_widget: &gtk::Widget, tab_id: &str) -> bool {
         &internals.tab_state,
         tab_id,
     );
-    clear_tab_unread_if_visible(
-        &internals.tab_state,
-        tab_id,
-        &internals.pane_outer.clone().upcast(),
-        &internals.callbacks,
-    );
     true
 }
 
@@ -1315,40 +1297,6 @@ fn clear_tab_unread(tab_state: &Rc<RefCell<TabState>>, tab_id: &str) -> bool {
         .borrow_mut()
         .find_tab_mut(tab_id)
         .is_some_and(|entry| set_tab_unread(entry, false))
-}
-
-fn clear_tab_unread_if_not_manual(tab_state: &Rc<RefCell<TabState>>, tab_id: &str) -> bool {
-    let mut ts = tab_state.borrow_mut();
-    let Some(entry) = ts.find_tab_mut(tab_id) else {
-        return false;
-    };
-    if entry.manual_unread {
-        return false;
-    }
-    set_tab_unread(entry, false)
-}
-
-fn clear_tab_unread_if_visible(
-    tab_state: &Rc<RefCell<TabState>>,
-    tab_id: &str,
-    pane_widget: &gtk::Widget,
-    callbacks: &Rc<PaneCallbacks>,
-) {
-    if (callbacks.is_pane_visible)(pane_widget) && clear_tab_unread(tab_state, tab_id) {
-        (callbacks.on_unread_changed)();
-    }
-}
-
-fn clear_tab_unread_if_visible_and_not_manual(
-    tab_state: &Rc<RefCell<TabState>>,
-    tab_id: &str,
-    pane_widget: &gtk::Widget,
-    callbacks: &Rc<PaneCallbacks>,
-) {
-    if (callbacks.is_pane_visible)(pane_widget) && clear_tab_unread_if_not_manual(tab_state, tab_id)
-    {
-        (callbacks.on_unread_changed)();
-    }
 }
 
 fn normalize_surface_hint(raw: &str) -> &str {
@@ -1969,6 +1917,32 @@ fn make_terminal_callbacks(
                 });
                 if let Some(activity) = activity {
                     activity.record_output(at);
+                }
+            }
+        }),
+        on_input: Rc::new({
+            let tab_state = Rc::downgrade(&internals.tab_state);
+            let callbacks = internals.callbacks.clone();
+            let tab_id = tab_id.to_string();
+            move |at, typed| {
+                let Some(tab_state) = tab_state.upgrade() else {
+                    return;
+                };
+                // Typing into a terminal is what reads it: its unread mark
+                // stays through looks and switches until then.
+                let cleared = {
+                    // A scripted send can come while pane code holds the state.
+                    let Ok(mut tab_state) = tab_state.try_borrow_mut() else {
+                        return;
+                    };
+                    let Some(entry) = tab_state.find_tab_mut(&tab_id) else {
+                        return;
+                    };
+                    entry.activity.note_input(at);
+                    typed && entry.unread && set_tab_unread(entry, false)
+                };
+                if cleared {
+                    (callbacks.on_unread_changed)();
                 }
             }
         }),
@@ -3386,28 +3360,6 @@ pub fn tab_is_visible_in_workspace(
         })
 }
 
-pub fn clear_active_tab_unread_in_root(root: &gtk::Widget) -> bool {
-    let mut changed = false;
-    for internals in pane_internals_for_root(root) {
-        let active_tab = internals.tab_state.borrow().active_tab.clone();
-        if let Some(tab_id) = active_tab {
-            changed |= clear_tab_unread(&internals.tab_state, &tab_id);
-        }
-    }
-    changed
-}
-
-pub fn clear_active_tab_unread_in_root_if_not_manual(root: &gtk::Widget) -> bool {
-    let mut changed = false;
-    for internals in pane_internals_for_root(root) {
-        let active_tab = internals.tab_state.borrow().active_tab.clone();
-        if let Some(tab_id) = active_tab {
-            changed |= clear_tab_unread_if_not_manual(&internals.tab_state, &tab_id);
-        }
-    }
-    changed
-}
-
 pub fn clear_all_tabs_unread_in_root(root: &gtk::Widget) -> bool {
     let mut changed = false;
     for internals in pane_internals_for_root(root) {
@@ -3438,6 +3390,68 @@ pub fn terminal_silence(tab_id: &str) -> Option<std::time::Duration> {
     entry
         .activity
         .silent_for(std::time::Instant::now(), state.spawned_at)
+}
+
+/// A live terminal's output, for the sidebar's list of kept terminals.
+pub struct TerminalOutputState {
+    pub pane_id: u32,
+    pub tab_id: String,
+    /// When it began printing on its own, while it still does.
+    pub working_since: Option<std::time::Instant>,
+    pub unread: bool,
+}
+
+/// Every live (not exited) terminal of a workspace and its own output.
+pub fn terminal_output_states(
+    workspace_id: &str,
+    now: std::time::Instant,
+) -> Vec<TerminalOutputState> {
+    let mut states = Vec::new();
+    for internals in pane_internals_for_workspace(workspace_id) {
+        let tabs = internals.tab_state.borrow();
+        for entry in &tabs.tabs {
+            if !matches!(entry.kind, TabKind::Terminal { .. })
+                || entry
+                    .title_label
+                    .has_css_class(exit_hold::EXITED_TAB_CSS_CLASS)
+            {
+                continue;
+            }
+            states.push(TerminalOutputState {
+                pane_id: internals.pane_id,
+                tab_id: entry.id.clone(),
+                working_since: entry.activity.working_since(now),
+                unread: entry.unread,
+            });
+        }
+    }
+    states
+}
+
+/// Act as if the user typed into a terminal tab (tests have no real keys).
+#[cfg(test)]
+pub fn simulate_typing_in_tab(tab_id: &str) {
+    let handle = terminal_tab_owner(tab_id).and_then(|internals| {
+        internals
+            .tab_state
+            .borrow()
+            .tabs
+            .iter()
+            .find(|entry| entry.id == tab_id)
+            .and_then(|entry| match &entry.kind {
+                TabKind::Terminal { state } => Some(state.handle.clone()),
+                _ => None,
+            })
+    });
+    if let Some(handle) = handle {
+        handle.simulate_typing();
+    }
+}
+
+/// Mark one terminal read, wherever it is. Returns whether it was unread.
+pub fn clear_tab_unread_by_id(tab_id: &str) -> bool {
+    terminal_tab_owner(tab_id)
+        .is_some_and(|internals| clear_tab_unread(&internals.tab_state, tab_id))
 }
 
 /// Like [`clear_all_tabs_unread_in_root`] for a list of panes, so panes a
@@ -3885,7 +3899,6 @@ fn remove_tab(
         // detaching after activation keeps that first child from flashing on
         // screen (see `terminal::detach_after_repaint`).
         activate_tab(tab_strip, content_stack, tab_state, &new_id);
-        clear_tab_unread_if_visible(tab_state, &new_id, &pane_outer.clone().upcast(), callbacks);
     }
     crate::terminal::remove_from_stack_after_repaint(&entry.content);
     if removed_was_unread {

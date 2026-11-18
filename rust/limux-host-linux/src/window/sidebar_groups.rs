@@ -343,6 +343,8 @@ fn group_activity(s: &AppState) -> GroupActivity {
                 Some(Activity::Unread)
             } else if counts.working > 0 {
                 Some(Activity::Working)
+            } else if counts.quiet > 0 {
+                Some(Activity::Quiet)
             } else {
                 None
             }

@@ -17,6 +17,21 @@ use std::collections::HashMap;
 /// a lost "needs you" is worse than a stale one.
 pub const QUIET_AFTER_MS: u64 = 10_000;
 
+/// The agent name of a plain terminal: one that printed on its own (a build,
+/// a server, a long command) without any agent hooks. Its state comes from
+/// its output, see [`ActivityStore::track_terminal`].
+pub const TERMINAL_AGENT: &str = "terminal";
+
+/// What [`ActivityStore::track_terminal`] saw happen to a plain terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalChange {
+    None,
+    /// It started printing on its own.
+    Started,
+    /// It stopped printing: the work ended.
+    Finished,
+}
+
 /// What an agent in a terminal is doing, as its hooks last said.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentPhase {
@@ -86,7 +101,11 @@ impl ActivityStore {
     ///   (or either side does not know its session).
     pub fn apply(&mut self, event: AgentEvent) -> bool {
         let current = self.surfaces.get(&event.tab_id);
-        if current.is_some_and(|current| event.at_ms < current.at_ms) {
+        // A plain terminal's state is a guess from its output; any agent
+        // hook replaces it.
+        if current
+            .is_some_and(|current| event.at_ms < current.at_ms && current.agent != TERMINAL_AGENT)
+        {
             return false;
         }
         match event.phase {
@@ -146,6 +165,91 @@ impl ActivityStore {
         self.surfaces.is_empty()
     }
 
+    /// Tabs listed as idle, for closing them all at once.
+    pub fn idle_tabs(&self) -> Vec<String> {
+        self.surfaces
+            .iter()
+            .filter(|(_, activity)| activity.phase == AgentPhase::Idle)
+            .map(|(tab_id, _)| tab_id.clone())
+            .collect()
+    }
+
+    /// Follow a terminal that agent hooks do not report on, from its own
+    /// output: `working_since` is when its current run of output began, or
+    /// `None` while it is quiet. A working terminal stays listed, as idle,
+    /// once it stops. Tabs an agent reports on are left alone.
+    pub fn track_terminal(
+        &mut self,
+        tab_id: &str,
+        now_ms: u64,
+        working_since: Option<u64>,
+    ) -> TerminalChange {
+        let current = self.surfaces.get_mut(tab_id);
+        if current
+            .as_ref()
+            .is_some_and(|current| current.agent != TERMINAL_AGENT)
+        {
+            return TerminalChange::None;
+        }
+        match (current, working_since) {
+            (Some(current), Some(_)) if current.phase == AgentPhase::Working => {
+                TerminalChange::None
+            }
+            (_, Some(since)) => {
+                self.surfaces.insert(
+                    tab_id.to_string(),
+                    SurfaceActivity {
+                        agent: TERMINAL_AGENT.to_string(),
+                        phase: AgentPhase::Working,
+                        session_id: None,
+                        at_ms: now_ms,
+                        since_ms: since,
+                        detail: None,
+                    },
+                );
+                TerminalChange::Started
+            }
+            (Some(current), None) if current.phase == AgentPhase::Working => {
+                current.phase = AgentPhase::Idle;
+                current.at_ms = now_ms;
+                current.since_ms = now_ms;
+                TerminalChange::Finished
+            }
+            _ => TerminalChange::None,
+        }
+    }
+
+    /// Keep a terminal listed (as idle) that has something for the user but
+    /// no state yet, such as an unread notification. Returns whether it was
+    /// added.
+    pub fn keep(&mut self, tab_id: &str, now_ms: u64) -> bool {
+        if self.surfaces.contains_key(tab_id) {
+            return false;
+        }
+        self.surfaces.insert(
+            tab_id.to_string(),
+            SurfaceActivity {
+                agent: TERMINAL_AGENT.to_string(),
+                phase: AgentPhase::Idle,
+                session_id: None,
+                at_ms: now_ms,
+                since_ms: now_ms,
+                detail: None,
+            },
+        );
+        true
+    }
+
+    /// The user closed a listed terminal: drop it until it does something
+    /// again. Only an idle one: working and waiting say what is going on.
+    /// Returns whether it was dropped.
+    pub fn dismiss(&mut self, tab_id: &str) -> bool {
+        if self.phase(tab_id) != Some(AgentPhase::Idle) {
+            return false;
+        }
+        self.surfaces.remove(tab_id).is_some()
+    }
+
     /// Settle working or waiting tabs that went quiet: no hook for
     /// [`QUIET_AFTER_MS`] and no terminal output for as long. `silent_ms`
     /// gives how long a tab's terminal has had no output, `None` when output
@@ -162,6 +266,7 @@ impl ActivityStore {
         let mut changed = false;
         for (tab_id, activity) in &mut self.surfaces {
             if activity.phase == AgentPhase::Idle
+                || activity.agent == TERMINAL_AGENT
                 || now_ms.saturating_sub(activity.at_ms) < QUIET_AFTER_MS
                 || (activity.phase.is_waiting() && !seen_after(tab_id, activity.at_ms))
             {
@@ -183,6 +288,8 @@ impl ActivityStore {
 pub struct ActivityCounts {
     pub working: usize,
     pub waiting: usize,
+    /// Idle after doing something, kept listed until closed.
+    pub quiet: usize,
 }
 
 impl ActivityCounts {
@@ -190,13 +297,15 @@ impl ActivityCounts {
         match phase {
             Some(AgentPhase::Working) => self.working += 1,
             Some(phase) if phase.is_waiting() => self.waiting += 1,
-            _ => {}
+            Some(_) => self.quiet += 1,
+            None => {}
         }
     }
 
     pub fn add(&mut self, other: Self) {
         self.working += other.working;
         self.waiting += other.waiting;
+        self.quiet += other.quiet;
     }
 }
 
@@ -271,6 +380,8 @@ pub enum PendingKind {
     Unread,
     /// Listed last and compact: nothing to act on, but one click away.
     Working,
+    /// Did something earlier and is quiet now; listed until closed.
+    Quiet,
 }
 
 /// Order pending entries `(kind, at_ms, item)`: waiting first, then unread,
@@ -412,7 +523,11 @@ mod tests {
 
     #[test]
     fn project_signal_prefers_waiting_then_unread_then_working() {
-        let counts = |working, waiting| ActivityCounts { working, waiting };
+        let counts = |working, waiting| ActivityCounts {
+            working,
+            waiting,
+            quiet: 0,
+        };
         let table = [
             (counts(0, 0), false, ProjectSignal::None),
             (counts(2, 0), false, ProjectSignal::Working),
@@ -449,7 +564,8 @@ mod tests {
             counts,
             ActivityCounts {
                 working: 2,
-                waiting: 1
+                waiting: 1,
+                quiet: 1
             }
         );
         assert_eq!(
@@ -460,7 +576,8 @@ mod tests {
         assert_eq!(
             counts_summary(ActivityCounts {
                 working: 0,
-                waiting: 2
+                waiting: 2,
+                quiet: 0
             })
             .as_deref(),
             Some("2 need you")
@@ -602,5 +719,64 @@ mod tests {
             7_000,
         ));
         assert_eq!(store.get("t").unwrap().since_ms, 7_000);
+    }
+
+    #[test]
+    fn a_plain_terminal_works_while_it_prints_and_stays_listed_after() {
+        let mut store = ActivityStore::default();
+        assert_eq!(store.track_terminal("t", 1_000, None), TerminalChange::None);
+        assert!(store.get("t").is_none(), "a quiet terminal is not listed");
+        assert_eq!(
+            store.track_terminal("t", 2_000, Some(1_500)),
+            TerminalChange::Started
+        );
+        let activity = store.get("t").unwrap();
+        assert_eq!(activity.phase, AgentPhase::Working);
+        assert_eq!(activity.since_ms, 1_500);
+        assert_eq!(
+            store.track_terminal("t", 3_000, Some(1_500)),
+            TerminalChange::None
+        );
+        assert_eq!(
+            store.track_terminal("t", 9_000, None),
+            TerminalChange::Finished
+        );
+        assert_eq!(store.phase("t"), Some(AgentPhase::Idle));
+        assert_eq!(
+            store.track_terminal("t", 10_000, None),
+            TerminalChange::None
+        );
+        // Closing it drops it until it prints again.
+        assert!(store.dismiss("t"));
+        assert!(store.get("t").is_none());
+        assert_eq!(
+            store.track_terminal("t", 20_000, Some(19_000)),
+            TerminalChange::Started
+        );
+        assert!(!store.dismiss("t"), "a working terminal cannot be closed");
+    }
+
+    #[test]
+    fn agent_hooks_win_over_a_guess_from_output() {
+        let mut store = ActivityStore::default();
+        store.track_terminal("t", 5_000, Some(4_000));
+        // A hook that ran just before the guess still applies.
+        assert!(store.apply(event("t", Some(AgentPhase::NeedsApproval), None, 4_900)));
+        assert_eq!(store.phase("t"), Some(AgentPhase::NeedsApproval));
+        // Output no longer moves an agent's state.
+        assert_eq!(store.track_terminal("t", 6_000, None), TerminalChange::None);
+        assert_eq!(store.phase("t"), Some(AgentPhase::NeedsApproval));
+        assert!(!store.dismiss("t"), "a waiting agent cannot be closed");
+    }
+
+    #[test]
+    fn an_unread_terminal_is_kept_as_idle() {
+        let mut store = ActivityStore::default();
+        assert!(store.keep("t", 1_000));
+        assert!(!store.keep("t", 2_000));
+        assert_eq!(store.phase("t"), Some(AgentPhase::Idle));
+        store.apply(event("u", Some(AgentPhase::Working), None, 1_000));
+        assert!(!store.keep("u", 2_000), "an agent's state is left alone");
+        assert_eq!(store.phase("u"), Some(AgentPhase::Working));
     }
 }

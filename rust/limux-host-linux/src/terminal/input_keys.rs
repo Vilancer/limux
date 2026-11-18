@@ -247,6 +247,7 @@ pub(super) fn paste_clipboard(
     surface: Option<ghostty_surface_t>,
     callbacks: &Rc<RefCell<TerminalCallbacks>>,
 ) {
+    super::note_input(callbacks, true);
     if !image_paste::try_begin(surface, callbacks) {
         surface_action(surface, "paste_from_clipboard");
     }

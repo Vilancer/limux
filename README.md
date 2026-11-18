@@ -370,7 +370,7 @@ time, enable **Settings → General → Ask for folder on new workspace**.
 | `Ctrl+Alt+Arrow` | Focus pane in direction |
 | `Ctrl+Alt+PageDown/Up` | Next or previous workspace |
 | `Ctrl+Alt+1-9` | Switch to workspace by number |
-| `Ctrl+Alt+O` | Switch to the most recent workspace, back to the pane you left |
+| `Ctrl+Alt+O` | Go back to the terminal you used before (press again to return), in any workspace |
 | `Ctrl+Alt+U` | Go to the next unread terminal, across workspaces and collapsed groups |
 | `Ctrl+Alt+Shift+U` | Go to the previous unread terminal |
 | `Ctrl+Alt+P` | Show the terminals waiting for you or unread, and jump to one |
@@ -411,8 +411,18 @@ its hooks when a session starts, so restart running sessions afterwards.
 |---|---|
 | `◆` | An agent asked for permission or a question and waits for you (rose) |
 | `●` | Unread: an agent finished a reply, or a terminal notified (the unread colour) |
-| spinner | An agent is working on a prompt (grey; still when animations are off) |
+| spinner | Working: an agent on a prompt, or a terminal printing on its own (grey; still when animations are off) |
+| `○` | Quiet: it did something earlier and is kept in the lists until you close it |
 | `✕` | A terminal's process ended while you were away |
+
+Any terminal that does something stays in the lists until you close it, not
+only agents. A plain terminal counts as working while it prints on its own (a
+build, a server, a long command), not while it only answers your typing, a
+resize or a focus change. When it stops while you are not looking, it turns
+unread (`●`, "Finished"). Afterwards it stays listed as quiet (`○`), with what
+it last said, until you close it with the `✕` on its row (or `Delete`), or
+with **Close quiet** in the Agents panel. Closing the terminal itself drops it
+too. An agent's terminal stays listed the same way between prompts.
 
 Loudness follows urgency: a project that waits for you is a tinted rose card,
 a finished one keeps its `●` and a bold name, and a working one is grey. Waiting
@@ -429,7 +439,7 @@ project rows and on terminal tabs.
   project count is in the header's tooltip.
 - A collapsed group stays compact: up to five active projects show as one
   line each (sign, name, what it does or says, age), waiting ones first, then
-  finished, then working; the selected project is not counted. Past five, a
+  finished, then working, then quiet; the selected project is not counted. Past five, a
   `+N working ›` (or `+N more ›`) row goes to the next one.
 - `Ctrl+Alt+U` goes to the next terminal waiting for you, or to the next unread
   terminal when nothing waits.
@@ -438,12 +448,15 @@ project rows and on terminal tabs.
   active. It follows the toolbar: the top bar, the sidebar header, or, with
   both hidden (full screen), the terminal's header next to the sidebar toggle,
   where the project's name then sits before the tabs. Clicking it or pressing
-  `Ctrl+Alt+P` opens **Agents**: waiting, finished and working terminals, each
-  with its project, the question or command it waits on (or its latest
-  message), and how long ago. Picking one, or pressing its number `1`-`9`,
-  focuses that terminal without expanding its group. **Mark all read** clears
-  unread marks only; a waiting terminal stays until the agent continues. With
-  nothing to list it explains the signs.
+  `Ctrl+Alt+P` opens **Agents**: waiting, finished, working and quiet
+  terminals, each with its project, the question or command it waits on (or
+  its latest message), and how long ago. Picking one, or pressing its number
+  `1`-`9`, focuses that terminal without expanding its group. `Delete` closes
+  the selected finished or quiet one from the lists. **Mark all read** clears
+  unread marks only (those terminals stay as quiet); a waiting terminal stays
+  until the agent continues. **Close quiet** closes every quiet one. Quiet
+  terminals are listed but not counted. With nothing to list it explains the
+  signs.
 - Under a project with one working or waiting terminal, a line says what it
   does or asks: the tool it just ran (`Bash: cargo test`), the prompt it got,
   or its question. With two or more active terminals each shows as a small tab
@@ -451,7 +464,7 @@ project rows and on terminal tabs.
   `3 ▾` button that lists every terminal, split panes in order with a line
   between panes; there the tab on screen is marked and background tabs are
   dimmed. Hovering a terminal outlines its pane, and clicking it focuses that
-  exact tab. Idle agents and plain shells get no sign.
+  exact tab. A terminal that never did anything gets no sign.
 - In the tab bar, a waiting terminal's tab is underlined in rose, a background
   agent tab shows what it does after its name, and an untitled agent tab is
   named after the agent (`Claude`, `Claude 2`) until the program sets a title.
@@ -459,9 +472,10 @@ project rows and on terminal tabs.
   of the sidebar names the command to run. It can be dismissed.
 - A screen reader hears when a terminal starts waiting for you (GTK 4.14 and
   newer).
-- Looking at a waiting terminal does not clear it; only the agent continuing
-  does. Unread clears after a project has been on screen for about a second, so
-  passing through projects with `Ctrl+Alt+PageDown` keeps their marks.
+- Looking at a terminal never clears its mark. Unread clears when you type or
+  paste into that terminal (or with **Mark as Read** or **Mark all read**), so
+  glancing at it and switching away keeps it. Waiting clears only when the
+  agent continues.
 - Claude Code sends no hook when you interrupt it with Esc, deny a permission
   or kill it. A working terminal that has printed nothing for 10 seconds
   (Claude Code keeps redrawing while it works or waits) is therefore shown as

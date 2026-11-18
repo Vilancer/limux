@@ -4,9 +4,10 @@
 //! group collapsed or the sidebar hidden. `Ctrl+Alt+P` opens it from anywhere.
 //!
 //! It reads the same state as the project rows, pills and group headers (agent
-//! activity and unread marks); it has no attention model of its own. Entries
-//! clear by the existing rules only: unread after a project has been on
-//! screen, waiting when the agent continues.
+//! activity and unread marks); it has no attention model of its own. Unread
+//! clears when the user types into the terminal (or marks it read), waiting
+//! when the agent continues. Terminals that did something stay listed as
+//! quiet until they are closed here or in the sidebar.
 
 use super::*;
 use crate::agent_activity::{self, PendingKind, GLYPH_UNREAD, GLYPH_WAITING};
@@ -24,6 +25,7 @@ pub(super) struct OpenPanel {
     popover: gtk::Popover,
     list: gtk::ListBox,
     mark_all: gtk::Button,
+    clear_quiet: gtk::Button,
     entries: Vec<PendingEntry>,
     /// Each entry's age label with its time, refreshed while the panel is open.
     ages: Vec<(gtk::Label, u64)>,
@@ -39,6 +41,8 @@ pub(super) struct PendingEntry {
     pane_id: Option<u32>,
     tab_id: Option<String>,
     title: String,
+    /// A plain terminal, not an agent.
+    plain: bool,
     message: String,
     /// A held terminal whose process ended.
     exited: bool,
@@ -117,7 +121,9 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                 let waiting = activity.is_some_and(|activity| activity.phase.is_waiting());
                 let working = activity
                     .is_some_and(|activity| activity.phase == agent_activity::AgentPhase::Working);
-                if !waiting && !tab.unread && !working {
+                let plain = activity
+                    .is_some_and(|activity| activity.agent == agent_activity::TERMINAL_AGENT);
+                if !waiting && !tab.unread && !working && activity.is_none() {
                     continue;
                 }
                 let note = s.tab_notes.get(&tab.tab_id);
@@ -137,13 +143,28 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                         activity.map_or(0, |activity| activity.since_ms),
                         message,
                     )
-                } else if !tab.unread {
+                } else if working && !tab.unread {
                     (
                         PendingKind::Working,
                         activity.map_or(0, |activity| activity.since_ms),
                         activity
                             .and_then(|activity| activity.detail.clone())
-                            .unwrap_or_else(|| "Working".to_string()),
+                            .unwrap_or_else(|| {
+                                if plain { "Running" } else { "Working" }.to_string()
+                            }),
+                    )
+                } else if !tab.unread {
+                    (
+                        PendingKind::Quiet,
+                        activity.map_or(0, |activity| activity.since_ms),
+                        note.map(|(text, _)| text.clone()).unwrap_or_else(|| {
+                            if plain {
+                                "Quiet"
+                            } else {
+                                "Waiting for a prompt"
+                            }
+                            .to_string()
+                        }),
                     )
                 } else {
                     (
@@ -166,6 +187,7 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                     } else {
                         tab.title
                     },
+                    plain,
                     message,
                     exited: tab.exited,
                 });
@@ -183,6 +205,7 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                 pane_id: None,
                 tab_id: None,
                 title: String::new(),
+                plain: false,
                 exited: false,
                 message: note.map_or_else(
                     || {
@@ -222,7 +245,8 @@ pub(super) fn sync(state: &State) {
         count(PendingKind::Unread),
         count(PendingKind::Working),
     );
-    if entries.is_empty() {
+    // Quiet terminals are listed in the panel but not counted.
+    if waiting + unread + working == 0 {
         counter.set_visible(false);
     } else {
         let parts = [
@@ -255,11 +279,14 @@ pub(super) fn sync(state: &State) {
             open.entries != entries,
             open.list.clone(),
             open.mark_all.clone(),
+            open.clear_quiet.clone(),
         )
     });
-    if let Some((changed, list, mark_all)) = open {
+    if let Some((changed, list, mark_all, clear_quiet)) = open {
         if changed {
-            let ages = fill_list(&list, &mark_all, &entries);
+            let selected = list.selected_row().map(|row| row.index());
+            let ages = fill_list(&list, &mark_all, &clear_quiet, &entries);
+            reselect(&list, selected);
             if let Some(open) = state.borrow_mut().pending_open.as_mut() {
                 open.entries = entries;
                 open.ages = ages;
@@ -374,7 +401,7 @@ fn open_panel(state: &State) {
     // The section headings already say what is waiting and what is unread;
     // the footer says how to move.
     let keys = gtk::Label::new(Some(
-        "\u{2191}\u{2193} Enter open \u{00B7} 1-9 jump \u{00B7} Esc",
+        "\u{2191}\u{2193} Enter \u{00B7} 1-9 jump \u{00B7} Del close",
     ));
     keys.add_css_class("limux-pending-dim");
     keys.set_xalign(0.0);
@@ -382,14 +409,19 @@ fn open_panel(state: &State) {
     let mark_all = gtk::Button::with_label("Mark all read");
     mark_all.add_css_class("limux-pending-mark-all");
     mark_all.set_focus_on_click(false);
-    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let clear_quiet = gtk::Button::with_label("Close quiet");
+    clear_quiet.add_css_class("limux-pending-mark-all");
+    clear_quiet.set_focus_on_click(false);
+    clear_quiet.set_tooltip_text(Some("Close every quiet terminal from the lists"));
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     footer.add_css_class("limux-pending-footer");
     footer.append(&keys);
+    footer.append(&clear_quiet);
     footer.append(&mark_all);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("limux-pending-panel");
-    content.set_size_request(360, -1);
+    content.set_size_request(380, -1);
     content.append(&header);
     content.append(&scroll);
     content.append(&footer);
@@ -417,6 +449,10 @@ fn open_panel(state: &State) {
             let plain = !modifiers.intersects(
                 gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK,
             );
+            if plain && matches!(key, gtk::gdk::Key::Delete | gtk::gdk::Key::KP_Delete) {
+                close_selected(&state);
+                return glib::Propagation::Stop;
+            }
             let digit = key.to_unicode().and_then(|c| c.to_digit(10));
             match digit {
                 Some(n @ 1..=9) if plain => {
@@ -431,6 +467,10 @@ fn open_panel(state: &State) {
     {
         let state = state.clone();
         mark_all.connect_clicked(move |_| mark_all_read(&state));
+    }
+    {
+        let state = state.clone();
+        clear_quiet.connect_clicked(move |_| close_quiet(&state));
     }
     {
         let previous_focus = parent
@@ -459,11 +499,12 @@ fn open_panel(state: &State) {
     }
 
     let entries = pending_entries(state);
-    let ages = fill_list(&list, &mark_all, &entries);
+    let ages = fill_list(&list, &mark_all, &clear_quiet, &entries);
     state.borrow_mut().pending_open = Some(OpenPanel {
         popover: popover.clone(),
         list: list.clone(),
         mark_all,
+        clear_quiet,
         entries,
         ages,
     });
@@ -503,16 +544,15 @@ fn first_activatable_row(list: &gtk::ListBox) -> Option<gtk::ListBoxRow> {
 fn fill_list(
     list: &gtk::ListBox,
     mark_all: &gtk::Button,
+    clear_quiet: &gtk::Button,
     entries: &[PendingEntry],
 ) -> Vec<(gtk::Label, u64)> {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
-    let unread = entries
-        .iter()
-        .filter(|entry| entry.kind == PendingKind::Unread)
-        .count();
-    mark_all.set_sensitive(unread > 0);
+    let count = |kind| entries.iter().filter(|entry| entry.kind == kind).count();
+    mark_all.set_sensitive(count(PendingKind::Unread) > 0);
+    clear_quiet.set_visible(count(PendingKind::Quiet) > 0);
 
     if entries.is_empty() {
         // Nothing to list: say what the signs mean instead.
@@ -536,6 +576,11 @@ fn fill_list(
                 agent_activity::GLYPH_WORKING,
                 "limux-pending-dim",
                 "Working",
+            ),
+            (
+                agent_activity::GLYPH_IDLE,
+                "limux-pending-dim",
+                "Quiet: did something, kept until you close it",
             ),
             (GLYPH_EXITED, "limux-pending-dim", "Exited"),
         ] {
@@ -570,6 +615,7 @@ fn fill_list(
                     PendingKind::Waiting => "WAITING FOR YOU",
                     PendingKind::Unread => "FINISHED",
                     PendingKind::Working => "WORKING",
+                    PendingKind::Quiet => "QUIET",
                 }
             )));
             label.set_xalign(0.0);
@@ -588,7 +634,7 @@ fn fill_list(
 }
 
 fn entry_row(entry: &PendingEntry, index: usize, now: u64) -> (gtk::ListBoxRow, gtk::Label) {
-    if entry.kind == PendingKind::Working {
+    if matches!(entry.kind, PendingKind::Working | PendingKind::Quiet) {
         return working_row(entry, index, now);
     }
     let glyph = gtk::Label::new(Some(match entry.kind {
@@ -667,11 +713,16 @@ fn entry_row(entry: &PendingEntry, index: usize, now: u64) -> (gtk::ListBoxRow, 
     (row, age)
 }
 
-/// A working agent: one compact line (spinner, project, what it does, age).
+/// A working or quiet terminal: one compact line (sign, project, what it
+/// does or last said, age).
 fn working_row(entry: &PendingEntry, index: usize, now: u64) -> (gtk::ListBoxRow, gtk::Label) {
     // A glyph, not a spinner: a spinner here did not appear in offscreen
     // snapshots of the popover, and a column of spinners is noisy anyway.
-    let spinner = gtk::Label::new(Some(agent_activity::GLYPH_WORKING));
+    let spinner = gtk::Label::new(Some(if entry.kind == PendingKind::Quiet {
+        agent_activity::GLYPH_IDLE
+    } else {
+        agent_activity::GLYPH_WORKING
+    }));
     spinner.add_css_class("limux-pending-dim");
     spinner.set_size_request(16, -1);
     let name = if entry.title.is_empty() {
@@ -706,7 +757,16 @@ fn working_row(entry: &PendingEntry, index: usize, now: u64) -> (gtk::ListBoxRow
     }
     row.set_child(Some(&content));
     row.set_widget_name(&format!("pending-{index}"));
-    let spoken = format!("{}, working: {}", entry.workspace_name, entry.message);
+    let spoken = format!(
+        "{}, {}: {}",
+        entry.workspace_name,
+        if entry.kind == PendingKind::Quiet {
+            "quiet"
+        } else {
+            "working"
+        },
+        entry.message
+    );
     row.set_tooltip_text(Some(&spoken));
     row.update_property(&[gtk::accessible::Property::Label(&spoken)]);
     (row, age)
@@ -764,6 +824,91 @@ fn activate_row(state: &State, row: &gtk::ListBoxRow) {
         tab_id: entry.tab_id,
     };
     activate_desktop_notification_target(state, &target, None);
+}
+
+/// Delete: close the selected finished or quiet terminal from the lists.
+fn close_selected(state: &State) {
+    let (list, tab_id) = {
+        let s = state.borrow();
+        let Some(open) = s.pending_open.as_ref() else {
+            return;
+        };
+        let Some(entry) = open
+            .list
+            .selected_row()
+            .and_then(|row| {
+                row.widget_name()
+                    .strip_prefix("pending-")
+                    .and_then(|index| index.parse::<usize>().ok())
+            })
+            .and_then(|index| open.entries.get(index))
+        else {
+            return;
+        };
+        if !matches!(entry.kind, PendingKind::Unread | PendingKind::Quiet) {
+            return;
+        }
+        let Some(tab_id) = entry.tab_id.clone() else {
+            return;
+        };
+        (open.list.clone(), tab_id)
+    };
+    agent_activity_ui::dismiss_terminal(state, &tab_id);
+    if list.selected_row().is_none() {
+        reselect(&list, Some(0));
+    }
+}
+
+/// Select the row at `index` after the list was rebuilt (or the last one),
+/// skipping section headings, and keep the keyboard in the list.
+fn reselect(list: &gtk::ListBox, index: Option<i32>) {
+    let Some(index) = index else {
+        return;
+    };
+    let mut target = None;
+    let mut i = 0;
+    while let Some(row) = list.row_at_index(i) {
+        if row.is_activatable() {
+            target = Some(row.clone());
+            if i >= index {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if let Some(row) = target {
+        list.select_row(Some(&row));
+        if list.root().is_some() {
+            row.grab_focus();
+        }
+    }
+}
+
+/// Close every quiet terminal from the lists. Unread and active ones stay.
+fn close_quiet(state: &State) {
+    let quiet: Vec<String> = {
+        let s = state.borrow();
+        let unread: HashSet<String> = pending_entries_unread_tabs(&s);
+        s.agent_activity
+            .idle_tabs()
+            .into_iter()
+            .filter(|tab_id| !unread.contains(tab_id))
+            .collect()
+    };
+    for tab_id in quiet {
+        agent_activity_ui::dismiss_terminal(state, &tab_id);
+    }
+}
+
+fn pending_entries_unread_tabs(s: &AppState) -> HashSet<String> {
+    s.workspaces
+        .iter()
+        .flat_map(|workspace| workspace.split_container.panes())
+        .filter_map(|pane_widget| pane::session_tabs_in_pane(&pane_widget))
+        .flat_map(|tabs| tabs.tabs)
+        .filter(|tab| tab.unread)
+        .map(|tab| tab.tab_id)
+        .collect()
 }
 
 /// Clear every unread mark. Waiting terminals stay: only the agent clears them.

@@ -435,10 +435,17 @@ impl TerminalHandle {
             return false;
         };
 
+        note_input(&self.callbacks, false);
         unsafe {
             ghostty_surface_text(surface, text.as_ptr() as *const c_char, text.len());
         }
         true
+    }
+
+    /// What a key press tells the owner, without a real key event.
+    #[cfg(test)]
+    pub fn simulate_typing(&self) {
+        note_input(&self.callbacks, true);
     }
 
     pub fn send_key(&self, key: &str) -> bool {
@@ -449,6 +456,7 @@ impl TerminalHandle {
         let Ok(binding) = NormalizedShortcut::parse(key) else {
             return false;
         };
+        note_input(&self.callbacks, false);
         let Some((keyval, modifier)) = gtk::accelerator_parse(binding.to_config_accel()) else {
             return false;
         };
@@ -1443,6 +1451,9 @@ unsafe extern "C" fn ghostty_close_surface_cb(userdata: *mut c_void, _process_al
 
 pub struct TerminalCallbacks {
     pub on_output_activity: Rc<dyn Fn(Instant)>,
+    /// Input reached the terminal at this time: `true` when the user typed
+    /// or pasted, `false` for a resize, a focus change or a scripted send.
+    pub on_input: Rc<dyn Fn(Instant, bool)>,
     pub on_title_changed: Box<TitleChangedCallback>,
     pub on_pwd_changed: Box<PwdChangedCallback>,
     pub on_desktop_notification: Box<DesktopNotificationCallback>,
@@ -1461,10 +1472,46 @@ pub struct TerminalCallbacks {
     pub copy_selection_to_clipboard: Box<dyn Fn() -> bool>,
 }
 
+/// Output this long after the surface is created is the shell starting up,
+/// on top of the one-second input grace (see [`TerminalCallbacks::on_input`]).
+const SURFACE_START_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Tell the owner that input reached the terminal (see
+/// [`TerminalCallbacks::on_input`]).
+pub(super) fn note_input(callbacks: &Rc<RefCell<TerminalCallbacks>>, typed: bool) {
+    let on_input = callbacks.borrow().on_input.clone();
+    on_input(Instant::now(), typed);
+}
+
+/// Keys that only modify another key, such as the Ctrl of a Limux shortcut.
+fn is_modifier_key(keyval: gtk::gdk::Key) -> bool {
+    use gtk::gdk::Key;
+    matches!(
+        keyval,
+        Key::Shift_L
+            | Key::Shift_R
+            | Key::Control_L
+            | Key::Control_R
+            | Key::Alt_L
+            | Key::Alt_R
+            | Key::Meta_L
+            | Key::Meta_R
+            | Key::Super_L
+            | Key::Super_R
+            | Key::Hyper_L
+            | Key::Hyper_R
+            | Key::ISO_Level3_Shift
+            | Key::ISO_Level5_Shift
+            | Key::Caps_Lock
+            | Key::Num_Lock
+    )
+}
+
 impl TerminalCallbacks {
     pub(crate) fn disconnected() -> Self {
         Self {
             on_output_activity: Rc::new(|_| {}),
+            on_input: Rc::new(|_, _| {}),
             image_paste_destination: Box::new(|| Ok(image_paste::ImagePasteDestination::Local)),
             on_title_changed: Box::new(|_| {}),
             on_pwd_changed: Box::new(|_| {}),
@@ -2026,6 +2073,12 @@ pub fn create_terminal(
             if flatpak::enabled() {
                 flatpak::surface_created();
             }
+            // The shell starts now (a restored background tab only when first
+            // shown): its start-up output is not activity of its own.
+            {
+                let on_input = callbacks.borrow().on_input.clone();
+                on_input(Instant::now() + SURFACE_START_GRACE, false);
+            }
             let surface_key = surface as usize;
             let surface_identity = register_surface_identity(surface_key);
             output_activity.bind(surface_identity);
@@ -2161,7 +2214,10 @@ pub fn create_terminal(
         let surface_cell = surface_cell.clone();
         let gl_for_resize = gl_area.clone();
         let had_focus = had_focus.clone();
+        let callbacks = callbacks.clone();
         let handler = gl_area.connect_resize(move |gl_area, width, height| {
+            // Programs redraw for the new size.
+            note_input(&callbacks, false);
             if let Some(surface) = *surface_cell.borrow() {
                 let w = width as u32;
                 let h = height as u32;
@@ -2196,8 +2252,10 @@ pub fn create_terminal(
         let pane_ime_press = pane_ime.clone();
         let pane_ime_release = pane_ime.clone();
         let key_controller = gtk::EventControllerKey::new();
+        let callbacks_for_keys = callbacks.clone();
         key_controller.connect_key_pressed(move |ctrl, keyval, keycode, modifier| {
             if let Some(surface) = *sc_press.borrow() {
+                note_input(&callbacks_for_keys, !is_modifier_key(keyval));
                 let current_event = ctrl
                     .current_event()
                     .and_then(|event| event.downcast::<gtk::gdk::KeyEvent>().ok());
@@ -2429,7 +2487,11 @@ pub fn create_terminal(
         let im_fallback_leave = im_fallback.clone();
         let focus_ctrl = gtk::EventControllerFocus::new();
         let sc = surface_cell.clone();
+        let callbacks_enter = callbacks.clone();
+        let callbacks_leave = callbacks.clone();
         focus_ctrl.connect_enter(move |_| {
+            // Programs that track focus redraw on it.
+            note_input(&callbacks_enter, false);
             had_focus_enter.set(true);
             im_context_enter.focus_in();
             im_fallback_enter.focus_in();
@@ -2438,6 +2500,7 @@ pub fn create_terminal(
             }
         });
         focus_ctrl.connect_leave(move |_| {
+            note_input(&callbacks_leave, false);
             had_focus_leave.set(false);
             im_context_leave.focus_out();
             im_fallback_leave.focus_out();

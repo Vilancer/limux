@@ -141,6 +141,15 @@ reports an Esc interrupt, a denied permission or a killed agent, so a working
 or waiting tab whose terminal printed nothing for 10 s settles to idle; this
 needs the tab activity setting, which tracks PTY output.
 
+Plain terminals get the same store under the agent name `terminal`
+(`ActivityStore::track_terminal`): a 1 s pass marks a tab working while it
+prints on its own (`TabActivity::working_since`, output more than 1 s after the
+last key, paste, resize or focus change, and 3 s after start) and idle when it
+stops, unread if it stopped off screen. Idle entries are the "quiet" terminals
+the sidebar keeps until the user closes them (`ActivityStore::dismiss`). Unread
+marks clear only on typing (`TerminalCallbacks::on_input` with `typed`) or an
+explicit mark-read, never on viewing.
+
 Keep `limux agent-team --dry-run` working without a host. For live behavior,
 the headless Weston smoke script exercises terminal surface health, input and
 screen readback, bridge routing, generated `AGENTS.md`, and session restart.

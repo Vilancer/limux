@@ -359,8 +359,18 @@ fn real_pty_output_drives_tab_activity_lifecycle() {
     wait_for(
         &context,
         Duration::from_secs(3),
-        "visiting the unread tab to map it and clear its blue dot",
-        || first_content.is_mapped() && !tab_unread_dot_is_visible(&source_widget, &first_id),
+        "visiting the unread tab to map it",
+        || first_content.is_mapped(),
+    );
+    pump_for(&context, Duration::from_millis(200));
+    assert!(
+        tab_unread_dot_is_visible(&source_widget, &first_id),
+        "a visit alone keeps the blue dot"
+    );
+    first_handle.simulate_typing();
+    assert!(
+        !tab_unread_dot_is_visible(&source_widget, &first_id),
+        "typing into the tab reads it"
     );
     assert!(
         !first_activity.widget().is_visible(),

@@ -682,8 +682,8 @@ fn passive_rename_focus_restore_preserves_manual_tab_unread() {
     );
     assert!(pane::activate_tab_in_pane(&pane, &tab_id));
     assert!(
-        !pane::workspace_has_unread_tabs(&ws_id),
-        "explicit tab activation still acknowledges its marker"
+        pane::workspace_has_unread_tabs(&ws_id),
+        "showing the tab keeps its marker until the user types"
     );
     peer.close();
     window.close();
@@ -786,7 +786,6 @@ fn tab_unread_changes_preserve_independent_workspace_notifications() {
     sync_workspace_unread(&state, &ws_id);
     assert!(pane::workspace_has_unread_tabs(&ws_id));
     assert!(notify_dot.get_visible());
-    assert!(!pane::clear_active_tab_unread_in_root_if_not_manual(&root));
     assert!(pane::workspace_has_unread_tabs(&ws_id));
     let menu = open_context_menu(row.upcast_ref());
     menu_item(&menu, "Mark as Read").emit_clicked();
@@ -1156,8 +1155,8 @@ fn next_unread_terminal_reaches_a_hidden_tab() {
     );
     assert_focus_within("the unread tab", &state, &pane);
     assert!(
-        !pane::workspace_has_unread_tabs(&ws_id),
-        "viewing it reads it"
+        pane::workspace_has_unread_tabs(&ws_id),
+        "viewing it keeps the mark until the user types"
     );
 
     let window = state.borrow().window.clone();
@@ -1252,10 +1251,16 @@ fn pending_panel_lists_a_finished_terminal_and_jumps_to_it() {
         None,
         "the panel closed"
     );
-    pump_until(wait, || !pane::workspace_has_unread_tabs(&ws_id));
+    pump_for(std::time::Duration::from_millis(1500));
+    assert!(
+        pane::workspace_has_unread_tabs(&ws_id),
+        "viewing it keeps the mark"
+    );
+    pane::simulate_typing_in_tab(&finished.tab_id);
+    pump_until(wait, || !counter.is_visible());
     assert!(
         !pane::workspace_has_unread_tabs(&ws_id),
-        "viewing it reads it"
+        "typing into it reads it"
     );
     assert!(!counter.is_visible(), "nothing pending any more");
 
@@ -1390,11 +1395,13 @@ fn pending_panel_works_with_both_bars_hidden() {
     pump_until(wait, || pending_panel::open_entry_count(&state).is_some());
     assert_eq!(pending_panel::open_entry_count(&state), Some(2));
 
-    // Mark all read: the finished one goes, the waiting one stays.
+    // Mark all read: the finished one turns quiet (still listed until it is
+    // closed, but not counted), the waiting one stays.
     pending_panel::click_mark_all(&state);
-    pump_until(wait, || pending_panel::open_entry_count(&state) == Some(1));
-    assert_eq!(pending_panel::open_entry_count(&state), Some(1));
+    pump_until(wait, || pending_panel::counter_text(&state) == "\u{25C6} 1");
     assert_eq!(pending_panel::counter_text(&state), "\u{25C6} 1");
+    assert_eq!(pending_panel::open_entry_count(&state), Some(2));
+    assert!(!pane::workspace_has_unread_tabs(&ws_id));
 
     // Ctrl+Alt+P again closes it.
     assert!(dispatch_shortcut_command(
@@ -1403,6 +1410,125 @@ fn pending_panel_works_with_both_bars_hidden() {
     ));
     pump_until(wait, || pending_panel::open_entry_count(&state).is_none());
     assert_eq!(pending_panel::open_entry_count(&state), None);
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+// A plain terminal that prints on its own in a background tab is listed as
+// working, turns unread when it stops, keeps that mark through a visit until
+// the user types, then stays listed as quiet until it is closed. Ctrl+Alt+O
+// goes back to the terminal used before.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn background_terminal_is_kept_until_closed() {
+    let (state, _temp) = pending_test_window("dev.limux.KeptTerminalTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    let front = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    let back = pane::active_surface_summary(&pane).unwrap();
+    let (_, back_handle) = pane::terminal_tabs_in_pane(&pane)
+        .into_iter()
+        .find(|(tab_id, _)| *tab_id == back.tab_id)
+        .unwrap();
+    let go_to = |tab_id: &str| {
+        activate_desktop_notification_target(
+            &state,
+            &DesktopNotificationTarget {
+                workspace_id: ws_id.clone(),
+                pane_id: Some(front.pane_id),
+                tab_id: Some(tab_id.to_string()),
+            },
+            None,
+        )
+    };
+    // Past the shell's start-up, then the command runs in the background.
+    pump_for(std::time::Duration::from_millis(3200));
+    assert!(back_handle.send_text(
+        "sleep 2; i=0; while [ $i -lt 6 ]; do echo tick$i; i=$((i+1)); sleep 0.3; done"
+    ));
+    assert!(back_handle.send_key("Enter"));
+    go_to(&front.tab_id);
+    pump_until(wait, || {
+        pane::active_tab_in_pane(&pane).as_deref() == Some(front.tab_id.as_str())
+    });
+    let phase = |tab_id: &str| state.borrow().agent_activity.phase(tab_id);
+    let long = std::time::Duration::from_secs(10);
+    pump_until(long, || {
+        phase(&back.tab_id) == Some(crate::agent_activity::AgentPhase::Working)
+    });
+    assert_eq!(
+        phase(&back.tab_id),
+        Some(crate::agent_activity::AgentPhase::Working),
+        "output of its own makes it working; screen: {:?}",
+        back_handle.read_viewport_text()
+    );
+    assert_eq!(
+        phase(&front.tab_id),
+        None,
+        "the tab the user only looked at is not listed"
+    );
+    assert_eq!(
+        agent_activity_ui::workspace_activity_counts(&state.borrow(), &ws_id).working,
+        1
+    );
+
+    // It stops while off screen: finished and unread.
+    pump_until(long, || pane::workspace_has_unread_tabs(&ws_id));
+    assert!(pane::workspace_has_unread_tabs(&ws_id));
+    assert_eq!(
+        phase(&back.tab_id),
+        Some(crate::agent_activity::AgentPhase::Idle)
+    );
+    assert_eq!(pending_panel::counter_text(&state), "\u{25CF} 1");
+
+    // A visit keeps the mark; typing reads it, and it stays listed.
+    go_to(&back.tab_id);
+    pump_for(std::time::Duration::from_millis(1500));
+    assert!(pane::workspace_has_unread_tabs(&ws_id), "a look keeps it");
+    pane::simulate_typing_in_tab(&back.tab_id);
+    pump_for(std::time::Duration::from_millis(200));
+    assert!(!pane::workspace_has_unread_tabs(&ws_id), "typing reads it");
+    assert_eq!(
+        agent_activity_ui::workspace_activity_counts(&state.borrow(), &ws_id).quiet,
+        1,
+        "kept as quiet"
+    );
+
+    // Ctrl+Alt+O goes back to the terminal used before, and again forth.
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::RecentWorkspace
+    ));
+    pump_until(wait, || {
+        pane::active_tab_in_pane(&pane).as_deref() == Some(front.tab_id.as_str())
+    });
+    assert_eq!(
+        pane::active_tab_in_pane(&pane).as_deref(),
+        Some(front.tab_id.as_str())
+    );
+    pump_for(std::time::Duration::from_millis(200));
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::RecentWorkspace
+    ));
+    pump_until(wait, || {
+        pane::active_tab_in_pane(&pane).as_deref() == Some(back.tab_id.as_str())
+    });
+    assert_eq!(
+        pane::active_tab_in_pane(&pane).as_deref(),
+        Some(back.tab_id.as_str())
+    );
+
+    // Closing it from the list drops it until it does something again.
+    agent_activity_ui::dismiss_terminal(&state, &back.tab_id);
+    assert_eq!(phase(&back.tab_id), None);
+    pump_for(std::time::Duration::from_millis(1500));
+    assert_eq!(phase(&back.tab_id), None, "it stays closed while quiet");
 
     let window = state.borrow().window.clone();
     window.close();

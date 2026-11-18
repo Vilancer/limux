@@ -129,6 +129,8 @@ pub(crate) struct AppState {
     /// Header rows of the groups in `sidebar`, by group id.
     group_headers: HashMap<String, sidebar_groups::GroupHeader>,
     last_focused_surface: Option<FocusRestoreTarget>,
+    /// The terminal focused before `last_focused_surface`, for going back.
+    previous_surface: Option<FocusRestoreTarget>,
     pending_focus_restore: Option<FocusRestoreTarget>,
     last_workspace_id: Option<String>,
     current_pane_by_workspace: HashMap<String, u32>,
@@ -162,7 +164,6 @@ pub(crate) struct AppState {
     /// Session rows as last drawn, per project, to skip unchanged rebuilds.
     session_views: HashMap<String, Vec<agent_activity_ui::SessionRowView>>,
     /// Bumped on every project switch; a pending unread clear checks it.
-    unread_dwell_epoch: u64,
     /// When each terminal tab was last on screen in an active window (Unix ms).
     tab_seen_ms: HashMap<String, u64>,
     /// Projects shown as one-line previews under a collapsed group.
@@ -2122,6 +2123,7 @@ pub fn build_window(app: &adw::Application) {
         sidebar: SidebarLayout::default(),
         group_headers: HashMap::new(),
         last_focused_surface: None,
+        previous_surface: None,
         pending_focus_restore: None,
         last_workspace_id: None,
         current_pane_by_workspace: HashMap::new(),
@@ -2151,7 +2153,6 @@ pub fn build_window(app: &adw::Application) {
         agent_activity: Default::default(),
         expanded_sessions: HashSet::new(),
         session_views: HashMap::new(),
-        unread_dwell_epoch: 0,
         tab_seen_ms: HashMap::new(),
         preview_rows: HashSet::new(),
         fullscreen_project: agent_activity_ui::build_fullscreen_project(),
@@ -2207,13 +2208,6 @@ pub fn build_window(app: &adw::Application) {
                 return;
             }
             restore_pending_focus_if_idle(&state, window.upcast_ref());
-            let workspace_id = state
-                .borrow()
-                .active_workspace()
-                .map(|workspace| workspace.id.clone());
-            if let Some(workspace_id) = workspace_id {
-                clear_visible_tab_unread_on_window_focus(&state, &workspace_id);
-            }
         });
     }
 
@@ -2977,7 +2971,9 @@ fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) -> bool {
             true
         }
         ShortcutCommand::RecentWorkspace => {
-            switch_to_recent_workspace(state);
+            if !jump_to_previous_terminal(state) {
+                switch_to_recent_workspace(state);
+            }
             true
         }
         ShortcutCommand::NextUnreadTerminal => {
@@ -8154,19 +8150,14 @@ fn switch_workspace(state: &State, idx: usize) {
 }
 
 fn switch_workspace_with_focus(state: &State, idx: usize, focus_entrypoint: bool) {
-    let active_workspace_id = {
+    {
         let s = state.borrow();
-        if idx >= s.workspaces.len() {
+        if idx >= s.workspaces.len() || idx == s.active_idx {
             return;
         }
-        (idx == s.active_idx).then(|| s.workspaces[idx].id.clone())
-    };
-    if let Some(workspace_id) = active_workspace_id {
-        clear_visible_tab_unread(state, &workspace_id);
-        return;
     }
 
-    let (stack, stack_name, focus_root, workspace_id, remembered_pane) = {
+    let (stack, stack_name, focus_root, _, remembered_pane) = {
         let mut s = state.borrow_mut();
         if let Some(prev_id) = s
             .workspaces
@@ -8190,9 +8181,6 @@ fn switch_workspace_with_focus(state: &State, idx: usize, focus_entrypoint: bool
     };
 
     stack.set_visible_child_name(&stack_name);
-    // Unread clears after the project stayed on screen for a moment, so
-    // passing through projects keeps their marks.
-    agent_activity_ui::schedule_unread_clear(state, &workspace_id);
     // A collapsed group shows only its active member (and waiting ones).
     sidebar_groups::sync_row_visibility(state);
     if focus_entrypoint {
@@ -8323,7 +8311,7 @@ fn capture_focus_restore_target(state: &State) -> Option<FocusRestoreTarget> {
                 focus_restore_target_for_pane(&workspace_id, &split_container, &widget)
             {
                 if let Ok(mut app_state) = state.try_borrow_mut() {
-                    app_state.last_focused_surface = Some(target.clone());
+                    note_focused_surface(&mut app_state, target.clone());
                 }
                 return Some(target);
             }
@@ -8341,10 +8329,57 @@ fn capture_focus_restore_target(state: &State) -> Option<FocusRestoreTarget> {
     let target = focus_restore_target_for_pane(&workspace_id, &split_container, &shown_pane);
     if let Some(target) = target.as_ref() {
         if let Ok(mut app_state) = state.try_borrow_mut() {
-            app_state.last_focused_surface = Some(target.clone());
+            note_focused_surface(&mut app_state, target.clone());
         }
     }
     target
+}
+
+/// Remember the focused terminal; the one before it becomes the way back.
+fn note_focused_surface(app_state: &mut AppState, target: FocusRestoreTarget) {
+    if let Some(last) = app_state.last_focused_surface.take() {
+        if last.tab_id != target.tab_id {
+            app_state.previous_surface = Some(last);
+        }
+    }
+    app_state.last_focused_surface = Some(target);
+}
+
+/// Go back to the terminal used before the current one, in any project.
+/// Returns false when there is none (it closed, or nothing was used yet).
+fn jump_to_previous_terminal(state: &State) -> bool {
+    let target = {
+        let s = state.borrow();
+        let active = s.active_workspace().map(|workspace| workspace.id.clone());
+        match &s.last_focused_surface {
+            // A switch whose focus is not recorded yet: the last terminal
+            // is the one to go back to.
+            Some(last) if Some(&last.workspace_id) != active.as_ref() => Some(last.clone()),
+            _ => s.previous_surface.clone(),
+        }
+    };
+    let Some(target) = target else {
+        return false;
+    };
+    if !pane::terminal_tabs_by_id().contains_key(&target.tab_id)
+        || !state
+            .borrow()
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == target.workspace_id)
+    {
+        return false;
+    }
+    activate_desktop_notification_target(
+        state,
+        &DesktopNotificationTarget {
+            workspace_id: target.workspace_id,
+            pane_id: Some(target.pane_id),
+            tab_id: Some(target.tab_id),
+        },
+        None,
+    );
+    true
 }
 
 fn focus_restore_target_for_pane(
@@ -8405,7 +8440,7 @@ fn record_last_focused_surface_from_window(state: &State, window: &gtk::Window) 
             {
                 if let Ok(mut app_state) = state.try_borrow_mut() {
                     note_workspace_pane_focus(&mut app_state, &workspace_id, target.pane_id);
-                    app_state.last_focused_surface = Some(target);
+                    note_focused_surface(&mut app_state, target);
                 }
                 return;
             }

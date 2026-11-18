@@ -668,7 +668,7 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 53] = [
         config_key: "recent_workspace",
         action_name: "win.recent-workspace",
         default_accel: "<Ctrl><Alt>o",
-        label: "Switch to Most Recent Workspace",
+        label: "Back to Previous Terminal",
         registers_gtk_accel: false,
         command: ShortcutCommand::RecentWorkspace,
         scope: ShortcutScope::Window,

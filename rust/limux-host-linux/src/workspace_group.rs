@@ -99,6 +99,8 @@ pub enum Activity {
     Unread,
     /// An agent is working.
     Working,
+    /// A terminal did something earlier and is quiet now.
+    Quiet,
 }
 
 /// Members of collapsed groups that stay visible because a terminal in them
@@ -113,7 +115,7 @@ pub struct ActivePreviews {
 impl SidebarLayout {
     /// For every collapsed group, up to `cap` active members stay visible:
     /// waiting ones first, then unread (finished) ones, then working ones,
-    /// each in sidebar order. The rows
+    /// then quiet ones, each in sidebar order. The rows
     /// keep their sidebar order. The active workspace is visible anyway and
     /// does not count toward the cap.
     pub fn active_previews(
@@ -1061,6 +1063,18 @@ mod tests {
         shown.sort();
         assert_eq!(shown, ["a", "b", "c"]);
         assert_eq!(previews.more[&g], ["e"]);
+
+        // Quiet members (idle after work) come last.
+        let with_quiet = |id: &str| match id {
+            "a" | "d" => Some(Activity::Quiet),
+            "e" => Some(Activity::Working),
+            _ => None,
+        };
+        let previews = layout.active_previews(Some("x"), with_quiet, 2);
+        let mut shown: Vec<_> = previews.shown.iter().cloned().collect();
+        shown.sort();
+        assert_eq!(shown, ["a", "e"]);
+        assert_eq!(previews.more[&g], ["d"]);
 
         // Only working members: they show the same way.
         let working_only = |id: &str| (id == "b").then_some(Activity::Working);
