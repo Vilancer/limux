@@ -19,7 +19,6 @@ const ROW_HEIGHT: i32 = 50;
 pub(super) struct OpenPanel {
     popover: gtk::Popover,
     list: gtk::ListBox,
-    summary: gtk::Label,
     mark_all: gtk::Button,
     entries: Vec<PendingEntry>,
     /// Each entry's age label with its time, refreshed while the panel is open.
@@ -106,10 +105,16 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                         Some(agent_activity::AgentPhase::NeedsInput) => "Has a question",
                         _ => "Needs approval",
                     };
+                    // The question or command itself when the agent said it,
+                    // as on the project row.
+                    let message = activity
+                        .and_then(|activity| activity.detail.clone())
+                        .or_else(|| note.map(|(text, _)| text.clone()))
+                        .unwrap_or_else(|| fallback.to_string());
                     (
                         PendingKind::Waiting,
                         activity.map_or(0, |activity| activity.at_ms),
-                        note.map_or(fallback.to_string(), |(text, _)| text.clone()),
+                        message,
                     )
                 } else {
                     (
@@ -126,7 +131,12 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                     group_color,
                     pane_id: Some(pane_id),
                     tab_id: Some(tab.tab_id),
-                    title: tab.title,
+                    // The default name says nothing next to the project.
+                    title: if tab.title == pane::DEFAULT_TERMINAL_TITLE {
+                        String::new()
+                    } else {
+                        tab.title
+                    },
                     message,
                 });
             }
@@ -204,13 +214,12 @@ pub(super) fn sync(state: &State) {
         (
             open.entries != entries,
             open.list.clone(),
-            open.summary.clone(),
             open.mark_all.clone(),
         )
     });
-    if let Some((changed, list, summary, mark_all)) = open {
+    if let Some((changed, list, mark_all)) = open {
         if changed {
-            let ages = fill_list(&list, &summary, &mark_all, &entries);
+            let ages = fill_list(&list, &mark_all, &entries);
             if let Some(open) = state.borrow_mut().pending_open.as_mut() {
                 open.entries = entries;
                 open.ages = ages;
@@ -311,16 +320,14 @@ fn open_panel(state: &State) {
         .child(&list)
         .build();
 
-    let summary = gtk::Label::new(None);
-    summary.add_css_class("limux-pending-dim");
-    summary.set_xalign(0.0);
-    summary.set_hexpand(true);
+    // The section headings already say what is waiting and what is unread.
     let mark_all = gtk::Button::with_label("Mark all read");
     mark_all.add_css_class("limux-pending-mark-all");
     mark_all.set_focus_on_click(false);
+    mark_all.set_halign(gtk::Align::End);
+    mark_all.set_hexpand(true);
     let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     footer.add_css_class("limux-pending-footer");
-    footer.append(&summary);
     footer.append(&mark_all);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -375,11 +382,10 @@ fn open_panel(state: &State) {
     }
 
     let entries = pending_entries(state);
-    let ages = fill_list(&list, &summary, &mark_all, &entries);
+    let ages = fill_list(&list, &mark_all, &entries);
     state.borrow_mut().pending_open = Some(OpenPanel {
         popover: popover.clone(),
         list: list.clone(),
-        summary,
         mark_all,
         entries,
         ages,
@@ -419,19 +425,16 @@ fn first_activatable_row(list: &gtk::ListBox) -> Option<gtk::ListBoxRow> {
 
 fn fill_list(
     list: &gtk::ListBox,
-    summary: &gtk::Label,
     mark_all: &gtk::Button,
     entries: &[PendingEntry],
 ) -> Vec<(gtk::Label, u64)> {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
-    let waiting = entries
+    let unread = entries
         .iter()
-        .filter(|entry| entry.kind == PendingKind::Waiting)
+        .filter(|entry| entry.kind == PendingKind::Unread)
         .count();
-    let unread = entries.len() - waiting;
-    summary.set_label(&summary_text(waiting, unread));
     mark_all.set_sensitive(unread > 0);
 
     if entries.is_empty() {
@@ -476,6 +479,9 @@ fn entry_row(entry: &PendingEntry, index: usize, now: u64) -> (gtk::ListBoxRow, 
         PendingKind::Unread => GLYPH_UNREAD,
     }));
     glyph.add_css_class("limux-pending-glyph");
+    if entry.kind == PendingKind::Waiting {
+        glyph.add_css_class("limux-pending-glyph-waiting");
+    }
     glyph.set_valign(gtk::Align::Start);
 
     let first_line = if entry.title.is_empty() {
@@ -641,10 +647,6 @@ pub(super) fn pending_panel_css() -> &'static str {
     font-size: 12px;
     font-weight: 700;
     background: alpha(@window_fg_color, 0.08);
-}
-.limux-pending-counter-waiting {
-    background: alpha(#f59e0b, 0.18);
-    box-shadow: inset 0 0 0 1px alpha(#f59e0b, 0.5);
 }
 .limux-pending-popover > contents {
     padding: 0;

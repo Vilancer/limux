@@ -28,7 +28,10 @@ pub(super) struct SessionRowView {
     /// First terminal of a pane after the first one: a hairline goes above.
     pane_start: bool,
     /// Not the pane's active tab, so not on screen when the project is.
+    /// Only marked in the full list (`▸`).
     background: bool,
+    /// The pane's active tab, marked with an edge in the full list.
+    shown: bool,
     glyph: &'static str,
     state_label: &'static str,
     agent: Option<String>,
@@ -172,13 +175,55 @@ fn settle_quiet_activity(state: &State) -> bool {
         return false;
     }
     let now = crate::agent_activity::now_ms();
-    state
-        .borrow_mut()
-        .agent_activity
-        .settle_quiet(now, |tab_id| {
+    note_seen_tabs(state, now);
+    let mut s = state.borrow_mut();
+    let AppState {
+        agent_activity,
+        tab_seen_ms,
+        ..
+    } = &mut *s;
+    agent_activity.settle_quiet(
+        now,
+        |tab_id| {
             pane::terminal_silence(tab_id)
                 .map(|silent| u64::try_from(silent.as_millis()).unwrap_or(u64::MAX))
-        })
+        },
+        |tab_id, at_ms| tab_seen_ms.get(tab_id).is_some_and(|seen| *seen > at_ms),
+    )
+}
+
+/// Remember that the tabs on screen (the active tab of each shown pane of the
+/// shown project, in an active window) were seen now. Closed tabs are dropped.
+fn note_seen_tabs(state: &State, now: u64) {
+    let root = {
+        let s = state.borrow();
+        if !s.window.is_active() {
+            None
+        } else {
+            s.active_workspace().map(|workspace| workspace.root.clone())
+        }
+    };
+    let mut shown = Vec::new();
+    if let Some(root) = root {
+        let mut panes = Vec::new();
+        collect_leaf_panes(&root, &mut panes);
+        shown.extend(
+            panes
+                .iter()
+                .filter_map(pane::active_surface_summary)
+                .map(|surface| surface.tab_id),
+        );
+    }
+    let mut s = state.borrow_mut();
+    let AppState {
+        agent_activity,
+        tab_seen_ms,
+        ..
+    } = &mut *s;
+    tab_seen_ms.retain(|tab_id, _| agent_activity.get(tab_id).is_some());
+    for tab_id in shown {
+        tab_seen_ms.insert(tab_id, now);
+    }
 }
 
 /// Repaint everything that reads agent state: project and pill signals, group
@@ -194,7 +239,31 @@ pub(super) fn refresh_activity(state: &State) {
     for id in &ids {
         paint_workspace_unread(state, id);
     }
+    sync_tab_signs(state);
     sidebar_groups::sync_row_visibility(state);
+}
+
+/// The same sign in each terminal's tab: waiting or working.
+fn sync_tab_signs(state: &State) {
+    let s = state.borrow();
+    pane::sync_tab_agent_signs(|tab_id| match s.agent_activity.phase(tab_id)? {
+        AgentPhase::NeedsApproval => Some(pane::TabAgentSign {
+            glyph: GLYPH_WAITING,
+            css_class: "limux-session-waiting",
+            tooltip: "Needs your approval",
+        }),
+        AgentPhase::NeedsInput => Some(pane::TabAgentSign {
+            glyph: GLYPH_WAITING,
+            css_class: "limux-session-waiting",
+            tooltip: "Has a question for you",
+        }),
+        AgentPhase::Working => Some(pane::TabAgentSign {
+            glyph: GLYPH_WORKING,
+            css_class: "limux-session-working",
+            tooltip: "Agent working",
+        }),
+        AgentPhase::Idle => None,
+    });
 }
 
 pub(super) fn install_activity_timer(state: &State) {
@@ -312,7 +381,8 @@ fn session_row_views(s: &AppState, panes: &[gtk::Widget], all: bool) -> Vec<Sess
                 tab_id: tab.tab_id,
                 title: tab.title,
                 pane_start: all && pane_index > 0 && index == 0,
-                background: !tab.active,
+                background: all && !tab.active,
+                shown: all && tab.active,
                 glyph,
                 state_label,
                 agent: activity.map(|activity| agent_label(&activity.agent)),
@@ -322,7 +392,30 @@ fn session_row_views(s: &AppState, panes: &[gtk::Widget], all: bool) -> Vec<Sess
         }
         pane_index += 1;
     }
+    // Name the agent only when a project mixes agents.
+    let agents: HashSet<&str> = views.iter().filter_map(|v| v.agent.as_deref()).collect();
+    if agents.len() < 2 {
+        for view in &mut views {
+            view.agent = None;
+        }
+    }
     views
+}
+
+/// With the list closed and a single active terminal, its line goes under
+/// the project name instead of a chip: what it does or asks. An unread one
+/// needs nothing more, as the project row already shows its message.
+fn inline_detail(views: &[SessionRowView]) -> Option<Option<(String, bool)>> {
+    let [view] = views else {
+        return None;
+    };
+    let waiting = matches!(view.state_label, "needs approval" | "needs input");
+    let working = view.state_label == "working";
+    Some(
+        (waiting || working)
+            .then(|| view.detail.clone().map(|detail| (detail, waiting)))
+            .flatten(),
+    )
 }
 
 /// Add the expand toggle and the (empty, hidden) session list to a project row.
@@ -401,7 +494,12 @@ pub(super) fn refresh_session_rows(state: &State, workspace_id: &str, force: boo
     if !force && old.as_ref() == Some(&views) {
         return;
     }
-    if !expanded && views.is_empty() {
+    let inline = if expanded {
+        None
+    } else {
+        inline_detail(&views)
+    };
+    if !expanded && (views.is_empty() || inline == Some(None)) {
         container.set_visible(false);
         if let Some(old) = old {
             clear_outlines(&old);
@@ -414,6 +512,25 @@ pub(super) fn refresh_session_rows(state: &State, workspace_id: &str, force: boo
         clear_outlines(old);
     }
     clear_children(&container);
+    if let Some(Some((detail, waiting))) = inline {
+        container.add_css_class("limux-ws-sessions-inline");
+        let line = gtk::Label::new(Some(&detail));
+        line.set_xalign(0.0);
+        line.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        line.add_css_class("limux-ws-activity-line");
+        if waiting {
+            line.add_css_class("limux-session-waiting");
+        }
+        line.set_tooltip_text(Some(&detail));
+        container.append(&line);
+        container.set_visible(true);
+        state
+            .borrow_mut()
+            .session_views
+            .insert(workspace_id.to_string(), views);
+        return;
+    }
+    container.remove_css_class("limux-ws-sessions-inline");
     if views.is_empty() {
         let empty = gtk::Label::new(Some("No terminals"));
         empty.set_xalign(0.0);
@@ -453,9 +570,10 @@ fn build_session_row(state: &State, workspace_id: &str, view: &SessionRowView) -
     match view.state_label {
         "needs approval" | "needs input" => glyph.add_css_class("limux-session-waiting"),
         "unread" => glyph.add_css_class("limux-session-unread"),
-        // A plain shell needs no sign; the terminal icon says what it is.
-        "terminal" => glyph.set_visible(false),
-        _ => {}
+        "working" => glyph.add_css_class("limux-session-working"),
+        "exited" => {}
+        // Nothing to act on: no sign. The terminal icon says what it is.
+        _ => glyph.set_visible(false),
     }
     let title = gtk::Label::builder()
         .label(&view.title)
@@ -497,7 +615,8 @@ fn build_session_row(state: &State, workspace_id: &str, view: &SessionRowView) -
     button.add_css_class("limux-session-row");
     if view.background {
         button.add_css_class("limux-session-row-background");
-    } else {
+    }
+    if view.shown {
         button.add_css_class("limux-session-row-shown");
     }
     let mut spoken = match &view.agent {
@@ -606,6 +725,28 @@ pub(super) fn agent_activity_css() -> &'static str {
     font-size: 10px;
     color: alpha(@window_fg_color, 0.5);
 }
+.limux-session-working,
+.limux-tab-agent-sign.limux-session-working {
+    color: alpha(@window_fg_color, 0.55);
+}
+.limux-tab-agent-sign {
+    font-size: 10px;
+    margin-right: 3px;
+}
+/* One active terminal: its line sits under the project name, no chip. */
+.limux-ws-sessions.limux-ws-sessions-inline {
+    margin: 0;
+    padding: 0;
+    border-left: none;
+}
+.limux-ws-activity-line {
+    font-size: 11px;
+    margin-left: 20px;
+    color: alpha(@window_fg_color, 0.62);
+}
+.limux-sidebar-list row .limux-ws-colored .limux-ws-activity-line {
+    color: alpha(white, 0.8);
+}
 .limux-session-pane-gap {
     margin: 4px 0;
     background: alpha(@window_fg_color, 0.25);
@@ -618,15 +759,17 @@ pub(super) fn agent_activity_css() -> &'static str {
 }
 .limux-ws-group-working {
     min-height: 0;
-    padding: 0 6px;
-    margin-left: 4px;
+    min-width: 0;
+    padding: 0 3px;
+    margin-left: 0;
     color: alpha(white, 0.75);
     font-size: 11px;
 }
 .limux-ws-group-waiting {
     min-height: 0;
-    padding: 0 6px;
-    margin-left: 4px;
+    min-width: 0;
+    padding: 0 3px;
+    margin-left: 0;
     font-size: 11px;
     font-weight: 700;
 }

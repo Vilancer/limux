@@ -409,18 +409,21 @@ its hooks when a session starts, so restart running sessions afterwards.
 
 | Sign | Meaning |
 |---|---|
-| `◆` | An agent asked for permission or a question and waits for you |
-| `●` | Unread: an agent finished a reply, or a terminal notified |
-| `↻` | An agent is working on a prompt |
+| `◆` | An agent asked for permission or a question and waits for you (rose) |
+| `●` | Unread: an agent finished a reply, or a terminal notified (the unread colour) |
+| `↻` | An agent is working on a prompt (grey) |
+
+Waiting has its own colour so it never looks like unread: rose, or amber when
+the unread colour is set to rose. The same sign shows in the terminal's tab.
 
 - A project row and its top-bar pill show one sign: waiting over unread over
   working. The pill shows only waiting and unread.
-- A group header shows `↻ N` working and `◆ N` waiting terminals, also when the
-  group is collapsed. Clicking `◆ N` goes to the group's next waiting terminal.
-  While nothing in the group waits, `● N` counts its unread projects, so a reply
-  that finished in a collapsed group still shows; clicking it goes there.
+- A group header shows `↻ N` working and `◆ N` waiting terminals and `● N`
+  unread projects, also when the group is collapsed. Clicking a count goes to
+  the group's next such terminal.
 - A collapsed group keeps up to three active projects visible below its
-  header, waiting ones first, then working ones; the selected project is not
+  header, waiting ones first, then finished (unread) ones, then working ones;
+  the selected project is not
   counted. Past three, a **N more** row goes to the next one. Clicking `↻ N` on
   the header goes to the group's next working terminal, without expanding it.
 - `Ctrl+Alt+U` goes to the next terminal waiting for you, or to the next unread
@@ -430,22 +433,26 @@ its hooks when a session starts, so restart running sessions afterwards.
   the top bar, the sidebar header, or, with both hidden (full screen), the
   terminal's header next to the sidebar toggle. Clicking it or pressing
   `Ctrl+Alt+P` opens a list of those terminals, waiting ones first, newest
-  first, each with its project, terminal and latest message. Picking one
+  first, each with its project, the question or command it waits on (or its
+  latest message), and how long ago. Picking one
   focuses that terminal without expanding its group. **Mark all read** clears
   unread marks only; a waiting terminal stays until the agent continues.
-- A project's active terminals (working, waiting or unread) show under its row
-  as small tabs, with what each one does or asks on a second line: the tool it
-  just ran (`Bash: cargo test`), the prompt it got, its question, or its last
-  message. The `▸` shows every terminal, split panes in order with a line
-  between panes; background tabs are dimmed. Hovering a terminal outlines its
-  pane, and clicking it focuses that exact tab.
+- Under a project with one working or waiting terminal, a line says what it
+  does or asks: the tool it just ran (`Bash: cargo test`), the prompt it got,
+  or its question. With two or more active terminals (working, waiting or
+  unread), each shows as a small tab with that line. The `▸` shows every
+  terminal, split panes in order with a line between panes; there the tab on
+  screen is marked and background tabs are dimmed. Hovering a terminal outlines
+  its pane, and clicking it focuses that exact tab. Idle agents and plain
+  shells get no sign.
 - Looking at a waiting terminal does not clear it; only the agent continuing
   does. Unread clears after a project has been on screen for about a second, so
   passing through projects with `Ctrl+Alt+PageDown` keeps their marks.
 - Claude Code sends no hook when you interrupt it with Esc, deny a permission
-  or kill it. A working or waiting terminal that has printed nothing for 10
-  seconds (Claude Code keeps redrawing while it works or waits) is therefore
-  shown as idle. This needs **Settings > General > Tab activity indicators** (on by
+  or kill it. A working terminal that has printed nothing for 10 seconds
+  (Claude Code keeps redrawing while it works or waits) is therefore shown as
+  idle. A waiting one only if you have had it on screen since it asked, so a
+  question you have not seen never disappears on its own. This needs **Settings > General > Tab activity indicators** (on by
   default), which tracks terminal output.
 - Agent state is live only: after a restart it comes back when the agent next
   reports. Other agents keep their notifications and show no live state yet.

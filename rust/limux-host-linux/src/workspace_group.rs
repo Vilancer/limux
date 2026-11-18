@@ -94,6 +94,8 @@ pub const ACTIVE_PREVIEW_CAP: usize = 3;
 pub enum Activity {
     /// A terminal waits for the user.
     Waiting,
+    /// A terminal finished or wrote something the user has not seen.
+    Unread,
     /// An agent is working.
     Working,
 }
@@ -109,7 +111,8 @@ pub struct ActivePreviews {
 
 impl SidebarLayout {
     /// For every collapsed group, up to `cap` active members stay visible:
-    /// waiting ones first, then working ones, each in sidebar order. The rows
+    /// waiting ones first, then unread (finished) ones, then working ones,
+    /// each in sidebar order. The rows
     /// keep their sidebar order. The active workspace is visible anyway and
     /// does not count toward the cap.
     pub fn active_previews(
@@ -1043,6 +1046,19 @@ mod tests {
         let mut shown: Vec<_> = previews.shown.iter().cloned().collect();
         shown.sort();
         assert_eq!(shown, ["a", "c", "f"]);
+        assert_eq!(previews.more[&g], ["e"]);
+
+        // A finished (unread) member ranks above working ones.
+        let with_unread = |id: &str| match id {
+            "b" => Some(Activity::Unread),
+            "a" | "e" => Some(Activity::Working),
+            "c" => Some(Activity::Waiting),
+            _ => None,
+        };
+        let previews = layout.active_previews(Some("x"), with_unread, 3);
+        let mut shown: Vec<_> = previews.shown.iter().cloned().collect();
+        shown.sort();
+        assert_eq!(shown, ["a", "b", "c"]);
         assert_eq!(previews.more[&g], ["e"]);
 
         // Only working members: they show the same way.

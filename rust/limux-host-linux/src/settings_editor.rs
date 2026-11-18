@@ -113,9 +113,17 @@ pub fn ui_scale_css(config: &AppConfig) -> String {
         })
         .collect();
     let c = config.appearance.unread_color.css_color();
+    let w = config.appearance.unread_color.waiting_css_color();
     rules.push(format!(
         ".limux-indicator-unread-dot, .limux-notify-dot, .limux-tab-unread-dot, \
-         .limux-session-waiting, .limux-session-unread, .limux-pending-glyph {{ color: {c}; }}\n\
+         .limux-session-unread, .limux-pending-glyph {{ color: {c}; }}\n\
+         .limux-notify-dot-waiting, .limux-indicator-waiting-dot, .limux-session-waiting, \
+         .limux-ws-group-needs-you, .limux-pending-glyph-waiting {{ color: {w}; }}\n\
+         .limux-session-glyph.limux-session-unread {{ color: {c}; }}\n\
+         .limux-session-glyph.limux-session-waiting, .limux-session-detail.limux-session-waiting, \
+         .limux-ws-activity-line.limux-session-waiting {{ color: {w}; }}\n\
+         .limux-pending-counter-waiting {{ color: {w}; background: alpha({w}, 0.18); \
+         box-shadow: inset 0 0 0 1px alpha({w}, 0.5); }}\n\
          .limux-notify-msg-unread {{ color: alpha({c}, 0.9); }}\n\
          .limux-sidebar-row-unread {{ background-color: alpha({c}, 0.14); border-left: 3px solid {c}; }}\n\
          .limux-sidebar-list row:selected .limux-sidebar-row-box.limux-sidebar-row-unread {{ background: alpha({c}, 0.18); border-left: 3px solid {c}; }}"

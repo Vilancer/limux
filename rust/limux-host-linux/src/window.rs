@@ -160,6 +160,8 @@ pub(crate) struct AppState {
     session_views: HashMap<String, Vec<agent_activity_ui::SessionRowView>>,
     /// Bumped on every project switch; a pending unread clear checks it.
     unread_dwell_epoch: u64,
+    /// When each terminal tab was last on screen in an active window (Unix ms).
+    tab_seen_ms: HashMap<String, u64>,
     /// The pending panel while it is open.
     pending_open: Option<pending_panel::OpenPanel>,
     /// Latest message and its time per terminal tab, for the pending panel.
@@ -2142,6 +2144,7 @@ pub fn build_window(app: &adw::Application) {
         expanded_sessions: HashSet::new(),
         session_views: HashMap::new(),
         unread_dwell_epoch: 0,
+        tab_seen_ms: HashMap::new(),
         pending_open: None,
         tab_notes: HashMap::new(),
         workspace_notes: HashMap::new(),

@@ -11,8 +11,10 @@ use std::collections::HashMap;
 
 /// No hook reports an interrupted turn (Esc), a denied permission or a killed
 /// agent. While Claude Code works or waits it keeps redrawing (spinner, timer,
-/// the blinking bullet of a pending tool), so a working or waiting agent whose
-/// terminal has been silent this long is treated as idle.
+/// the blinking bullet of a pending tool), so a working agent whose terminal
+/// has been silent this long is treated as idle. A waiting one only if the
+/// user has had it on screen since it asked: answering needs them there, and
+/// a lost "needs you" is worse than a stale one.
 pub const QUIET_AFTER_MS: u64 = 10_000;
 
 /// What an agent in a terminal is doing, as its hooks last said.
@@ -141,17 +143,21 @@ impl ActivityStore {
     /// Settle working or waiting tabs that went quiet: no hook for
     /// [`QUIET_AFTER_MS`] and no terminal output for as long. `silent_ms`
     /// gives how long a tab's terminal has had no output, `None` when output
-    /// is not tracked (then the tab is left alone). Returns whether any
-    /// changed. A later hook still applies, as its time is newer.
+    /// is not tracked (then the tab is left alone). `seen_after(tab, at_ms)`
+    /// says whether the tab was on screen after `at_ms`; a waiting tab settles
+    /// only then. Returns whether any changed. A later hook still applies, as
+    /// its time is newer.
     pub fn settle_quiet(
         &mut self,
         now_ms: u64,
         mut silent_ms: impl FnMut(&str) -> Option<u64>,
+        mut seen_after: impl FnMut(&str, u64) -> bool,
     ) -> bool {
         let mut changed = false;
         for (tab_id, activity) in &mut self.surfaces {
             if activity.phase == AgentPhase::Idle
                 || now_ms.saturating_sub(activity.at_ms) < QUIET_AFTER_MS
+                || (activity.phase.is_waiting() && !seen_after(tab_id, activity.at_ms))
             {
                 continue;
             }
@@ -528,7 +534,8 @@ mod tests {
             "untracked" => None,
             _ => Some(QUIET_AFTER_MS),
         };
-        assert!(store.settle_quiet(100_000, silent));
+        let seen = |_: &str, _: u64| true;
+        assert!(store.settle_quiet(100_000, silent, seen));
         for tab in ["working", "approval", "question", "idle"] {
             assert_eq!(store.phase(tab), Some(AgentPhase::Idle), "{tab}");
         }
@@ -536,15 +543,40 @@ mod tests {
         for tab in ["busy", "untracked", "fresh"] {
             assert_eq!(store.phase(tab), Some(AgentPhase::Working), "{tab}");
         }
-        assert!(!store.settle_quiet(100_000, silent));
+        assert!(!store.settle_quiet(100_000, silent, seen));
     }
 
     #[test]
     fn a_hook_after_settling_still_applies() {
         let mut store = ActivityStore::default();
         store.apply(event("t", Some(AgentPhase::Working), Some("s"), 1_000));
-        assert!(store.settle_quiet(20_000, |_| Some(15_000)));
+        assert!(store.settle_quiet(20_000, |_| Some(15_000), |_, _| true));
         assert!(store.apply(event("t", Some(AgentPhase::Working), Some("s"), 21_000)));
         assert_eq!(store.phase("t"), Some(AgentPhase::Working));
+    }
+
+    #[test]
+    fn a_quiet_waiting_agent_stays_until_the_user_saw_it() {
+        let mut store = ActivityStore::default();
+        store.apply(event(
+            "asked",
+            Some(AgentPhase::NeedsInput),
+            Some("s"),
+            1_000,
+        ));
+        store.apply(event(
+            "working",
+            Some(AgentPhase::Working),
+            Some("s"),
+            1_000,
+        ));
+        let silent = |_: &str| Some(QUIET_AFTER_MS);
+        // Not on screen since it asked (seen only before): the question stays.
+        assert!(store.settle_quiet(20_000, silent, |_, at| at < 500));
+        assert_eq!(store.phase("asked"), Some(AgentPhase::NeedsInput));
+        assert_eq!(store.phase("working"), Some(AgentPhase::Idle));
+        // Seen after it asked, then silent: answered or denied there.
+        assert!(store.settle_quiet(20_000, silent, |_, at| at <= 5_000));
+        assert_eq!(store.phase("asked"), Some(AgentPhase::Idle));
     }
 }

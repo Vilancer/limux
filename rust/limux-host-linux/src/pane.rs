@@ -263,6 +263,9 @@ type PaneEmptyCallback = dyn Fn(&gtk::Widget, PaneEmptyReason);
 /// A terminal process ended while nobody watched it: pane id, tab id, message.
 /// `(pane_id, tab_id, message, failed)`: a held exit nobody saw. `failed`
 /// means a non-zero code (or a signal), which also earns a desktop notice.
+/// The name of a terminal tab until its program sets a title.
+pub const DEFAULT_TERMINAL_TITLE: &str = "Terminal";
+
 type PaneTerminalExitedCallback = dyn Fn(u32, &str, &str, bool);
 type PaneOpenBrowserHereCallback = dyn Fn(&gtk::Widget);
 type PaneOpenUrlInBrowserCallback = dyn Fn(&gtk::Widget, &str);
@@ -940,6 +943,68 @@ pub fn terminal_tabs_by_id() -> std::collections::HashMap<String, bool> {
             }
         }
         tabs
+    })
+}
+
+/// What an agent in a terminal tab is doing, as a small sign in its tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TabAgentSign {
+    pub glyph: &'static str,
+    pub css_class: &'static str,
+    pub tooltip: &'static str,
+}
+
+const TAB_AGENT_SIGN_CSS_CLASS: &str = "limux-tab-agent-sign";
+
+/// Set the agent sign of every terminal tab from `sign_of(tab_id)`; `None`
+/// hides it. The sign sits next to the unread dot.
+pub fn sync_tab_agent_signs(mut sign_of: impl FnMut(&str) -> Option<TabAgentSign>) {
+    PANE_REGISTRY.with(|registry| {
+        for internals in registry.borrow().values().filter_map(|weak| weak.upgrade()) {
+            for entry in &internals.tab_state.borrow().tabs {
+                if !matches!(entry.kind, TabKind::Terminal { .. }) {
+                    continue;
+                }
+                let sign = sign_of(&entry.id);
+                let existing = entry
+                    .unread_dot
+                    .next_sibling()
+                    .and_downcast::<gtk::Label>()
+                    .filter(|label| label.has_css_class(TAB_AGENT_SIGN_CSS_CLASS));
+                let label = match (existing, sign) {
+                    (Some(label), _) => label,
+                    (None, None) => continue,
+                    (None, Some(_)) => {
+                        let label = gtk::Label::new(None);
+                        label.add_css_class(TAB_AGENT_SIGN_CSS_CLASS);
+                        label.set_can_target(false);
+                        let Some(parent) = entry.unread_dot.parent().and_downcast::<gtk::Box>()
+                        else {
+                            continue;
+                        };
+                        parent.insert_child_after(&label, Some(&entry.unread_dot));
+                        label
+                    }
+                };
+                for class in ["limux-session-waiting", "limux-session-working"] {
+                    label.remove_css_class(class);
+                }
+                match sign {
+                    Some(sign) => {
+                        label.set_label(sign.glyph);
+                        label.add_css_class(sign.css_class);
+                        entry.tab_button.set_tooltip_text(Some(sign.tooltip));
+                        label.set_visible(true);
+                    }
+                    None => {
+                        if label.is_visible() {
+                            entry.tab_button.set_tooltip_text(None);
+                        }
+                        label.set_visible(false);
+                    }
+                }
+            }
+        }
     })
 }
 
@@ -2418,7 +2483,7 @@ fn add_terminal_tab_inner(
         .and_then(|value| value.id.map(|id| id.to_string()))
         .unwrap_or_else(new_tab_id);
     let (tab_btn, title_label, unread_dot, activity) =
-        build_tab_button("Terminal", &tab_id, internals);
+        build_tab_button(DEFAULT_TERMINAL_TITLE, &tab_id, internals);
 
     let term_cwd = Rc::new(RefCell::new(
         options

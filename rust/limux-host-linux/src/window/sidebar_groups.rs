@@ -133,6 +133,7 @@ fn build_group_header(state: &State, group_id: &str) -> GroupHeader {
     waiting_button.add_css_class("flat");
     waiting_button.add_css_class("limux-ws-group-waiting");
     waiting_button.add_css_class("limux-notify-dot");
+    waiting_button.add_css_class("limux-ws-group-needs-you");
     waiting_button.set_focus_on_click(false);
     waiting_button.set_valign(gtk::Align::Center);
     waiting_button.set_visible(false);
@@ -243,13 +244,10 @@ fn update_group_activity(
         .waiting_button
         .update_property(&[gtk::accessible::Property::Label(&waiting_tip)]);
 
-    // Unread is secondary: shown only while nothing in the group waits.
     header
         .unread_button
         .set_label(&format!("{GLYPH_UNREAD} {unread_projects}"));
-    header
-        .unread_button
-        .set_visible(counts.waiting == 0 && unread_projects > 0);
+    header.unread_button.set_visible(unread_projects > 0);
     let unread_tip = format!(
         "{}: {unread_projects} unread project{}. Go to the next one",
         group.name,
@@ -307,12 +305,24 @@ fn group_activity(s: &AppState) -> GroupActivity {
         })
         .collect();
     let active = s.active_workspace().map(|workspace| workspace.id.as_str());
+    let unread: HashSet<&str> = s
+        .workspaces
+        .iter()
+        .filter(|workspace| {
+            workspace.unread
+                || workspace.manual_unread
+                || pane::workspace_has_unread_tabs(&workspace.id)
+        })
+        .map(|workspace| workspace.id.as_str())
+        .collect();
     let previews = s.sidebar.active_previews(
         active,
         |id| {
             let counts = by_workspace.get(id)?;
             if counts.waiting > 0 {
                 Some(Activity::Waiting)
+            } else if unread.contains(id) {
+                Some(Activity::Unread)
             } else if counts.working > 0 {
                 Some(Activity::Working)
             } else {
@@ -333,16 +343,6 @@ fn group_activity(s: &AppState) -> GroupActivity {
             }
             (group.id.clone(), counts)
         })
-        .collect();
-    let unread: HashSet<&str> = s
-        .workspaces
-        .iter()
-        .filter(|workspace| {
-            workspace.unread
-                || workspace.manual_unread
-                || pane::workspace_has_unread_tabs(&workspace.id)
-        })
-        .map(|workspace| workspace.id.as_str())
         .collect();
     let unread_by_group = s
         .sidebar
@@ -410,6 +410,9 @@ fn update_group_header(header: &GroupHeader, group: &WorkspaceGroup) {
         "\u{25BE}"
     });
     header.name_label.set_label(&group.name);
+    // The counts beside it must not squeeze a short name into "…".
+    let name_chars = i32::try_from(group.name.chars().count()).unwrap_or(i32::MAX);
+    header.name_label.set_width_chars(name_chars.min(8));
     for color in WorkspaceColor::ALL {
         header.pill.remove_css_class(&group_color_class(color));
     }

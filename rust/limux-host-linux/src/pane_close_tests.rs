@@ -1481,17 +1481,21 @@ fn session_rows_list_terminals_as_tabs() {
             .filter(|button| button.has_css_class("limux-session-row"))
             .collect()
     };
-    // Closed, the list already shows the working terminal and what it does.
+    // Closed, a single active terminal puts what it does under the project
+    // name, with no chip.
     pump_for(std::time::Duration::from_millis(300));
     assert!(sessions.is_visible(), "an active terminal shows without ▸");
-    assert_eq!(chips(&sessions).len(), 1, "only the active one");
-    let details: Vec<String> = widget_tree(sessions.upcast_ref())
+    assert!(
+        chips(&sessions).is_empty(),
+        "one active terminal needs no chip"
+    );
+    let lines: Vec<String> = widget_tree(sessions.upcast_ref())
         .into_iter()
         .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
-        .filter(|label| label.has_css_class("limux-session-detail"))
+        .filter(|label| label.has_css_class("limux-ws-activity-line"))
         .map(|label| label.label().to_string())
         .collect();
-    assert_eq!(details, ["Bash: cargo test"]);
+    assert_eq!(lines, ["Bash: cargo test"]);
     snapshot_widget(sidebar.upcast_ref(), "session-rows-closed");
 
     toggle.emit_clicked();
