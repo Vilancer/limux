@@ -367,17 +367,31 @@ pub(super) fn cycle_unread_terminal(state: &State, forward: bool) {
 /// Go to the next working terminal of a group's projects (the group header's
 /// working button), leaving the group as it is.
 pub(super) fn cycle_working_terminal(state: &State, group: &str) {
-    cycle_terminals(state, true, Some(group), true);
+    cycle_terminals(state, true, Some(group), CycleStops::Working);
 }
 
 /// As `cycle_unread_terminal`; with `group`, only that group's projects
-/// (the group header's waiting and unread buttons).
+/// (the group header's waiting button).
 pub(super) fn cycle_attention_terminal(state: &State, forward: bool, group: Option<&str>) {
-    cycle_terminals(state, forward, group, false);
+    cycle_terminals(state, forward, group, CycleStops::Attention);
 }
 
-/// Cycle waiting-then-unread terminals, or with `working` the working ones.
-fn cycle_terminals(state: &State, forward: bool, group: Option<&str>, working: bool) {
+/// The next unread terminal of a group's projects (the group header's unread
+/// button), even while others wait.
+pub(super) fn cycle_unread_in_group(state: &State, group: &str) {
+    cycle_terminals(state, true, Some(group), CycleStops::Unread);
+}
+
+/// Which terminals a cycle stops at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CycleStops {
+    /// Waiting ones, else unread ones.
+    Attention,
+    Unread,
+    Working,
+}
+
+fn cycle_terminals(state: &State, forward: bool, group: Option<&str>, kind: CycleStops) {
     let members = group.map(|group| {
         state
             .borrow()
@@ -433,10 +447,14 @@ fn cycle_terminals(state: &State, forward: bool, group: Option<&str>, working: b
             }
             for (tab_idx, tab_id) in pane::tab_ids_in_pane(pane_widget).into_iter().enumerate() {
                 let phase = state.borrow().agent_activity.phase(&tab_id);
-                let matches = if working {
-                    phase == Some(crate::agent_activity::AgentPhase::Working)
-                } else {
-                    phase.is_some_and(crate::agent_activity::AgentPhase::is_waiting)
+                let matches = match kind {
+                    CycleStops::Working => {
+                        phase == Some(crate::agent_activity::AgentPhase::Working)
+                    }
+                    CycleStops::Attention => {
+                        phase.is_some_and(crate::agent_activity::AgentPhase::is_waiting)
+                    }
+                    CycleStops::Unread => false,
                 };
                 if matches {
                     agent_stops.push((workspace_idx, pane_idx, tab_idx));
@@ -467,7 +485,7 @@ fn cycle_terminals(state: &State, forward: bool, group: Option<&str>, working: b
             });
         }
     }
-    if working || !agent_stops.is_empty() {
+    if kind == CycleStops::Working || !agent_stops.is_empty() {
         stops = agent_stops;
         targets = agent_targets;
     }

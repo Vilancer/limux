@@ -1698,6 +1698,93 @@ fn report(
     .unwrap();
 }
 
+// A collapsed group's `● N` goes to an unread terminal even while another
+// waits, and `+N more` focuses the terminal that put a project there, here a
+// quiet agent in a background tab.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn group_counts_and_overflow_reach_the_right_terminal() {
+    use crate::agent_activity::AgentPhase::{Idle, NeedsApproval, Working};
+    let (state, _temp) = pending_test_window("dev.limux.GroupJumpTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (home_id, _) = add_named_workspace(&state, "home");
+    let mut members = Vec::new();
+    let mut tabs = Vec::new();
+    for name in ["waits", "finished", "w1", "w2", "w3", "quiet"] {
+        let (id, pane) = add_named_workspace(&state, name);
+        tabs.push(pane::active_surface_summary(&pane).unwrap());
+        if name == "quiet" {
+            // The quiet agent sits in a background tab.
+            pane::add_terminal_tab_to_pane(&pane);
+        }
+        members.push(id);
+    }
+    let group = sidebar_groups::create_group(&state, Some("G"), None, &members).unwrap();
+    sidebar_groups::set_group_collapsed(&state, &group, true).unwrap();
+    let index_of = |id: &str| {
+        state
+            .borrow()
+            .workspaces
+            .iter()
+            .position(|w| w.id == id)
+            .unwrap()
+    };
+    select_workspace_by_index(&state, index_of(&home_id));
+    pump_for(std::time::Duration::from_millis(500));
+
+    report(
+        &state,
+        &members[0],
+        &tabs[0].tab_id,
+        NeedsApproval,
+        "Bash: ls",
+    );
+    mark_workspace_unread_with_message(
+        &state,
+        &members[1],
+        "Claude finished",
+        false,
+        DesktopNotificationTarget {
+            workspace_id: members[1].clone(),
+            pane_id: Some(tabs[1].pane_id),
+            tab_id: Some(tabs[1].tab_id.clone()),
+        },
+    );
+    for i in 2..5 {
+        report(&state, &members[i], &tabs[i].tab_id, Working, "Edit: x");
+    }
+    report(&state, &members[5], &tabs[5].tab_id, Idle, "");
+    pump_for(std::time::Duration::from_millis(300));
+
+    let active_id = || state.borrow().active_workspace().unwrap().id.clone();
+    sidebar_groups::click_unread_count(&state, &group);
+    pump_until(wait, || active_id() == members[1]);
+    assert_eq!(
+        active_id(),
+        members[1],
+        "the unread count reaches the finished project, not the waiting one"
+    );
+
+    select_workspace_by_index(&state, index_of(&home_id));
+    pump_for(std::time::Duration::from_millis(300));
+    sidebar_groups::click_more(&state, &group);
+    let quiet_pane = first_leaf_pane(&state.borrow().workspaces[index_of(&members[5])].root);
+    pump_until(wait, || {
+        active_id() == members[5]
+            && pane::active_tab_in_pane(&quiet_pane).as_deref() == Some(tabs[5].tab_id.as_str())
+    });
+    assert_eq!(active_id(), members[5], "+1 more goes to the quiet project");
+    assert_eq!(
+        pane::active_tab_in_pane(&quiet_pane).as_deref(),
+        Some(tabs[5].tab_id.as_str()),
+        "and to its quiet terminal, not the tab in front"
+    );
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
 // Not a check: builds a realistic sidebar (two groups, one collapsed, agents
 // working, waiting and finished) and saves pictures of each view for a UX
 // review. Run with LIMUX_TEST_SNAPSHOT_DIR set.

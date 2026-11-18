@@ -168,7 +168,7 @@ fn build_group_header(state: &State, group_id: &str) -> GroupHeader {
         let state = state.clone();
         let group_id = group_id.to_string();
         unread_button.connect_clicked(move |_| {
-            cycle_attention_terminal(&state, true, Some(&group_id));
+            cycle_unread_in_group(&state, &group_id);
         });
     }
 
@@ -413,29 +413,57 @@ fn show_next_hidden_active(state: &State, group_id: &str) {
     let Some(workspace_id) = first_hidden else {
         return;
     };
-    // Its waiting terminal, else its working one.
-    let tabs = pane::terminal_tab_ids_in_workspace(&workspace_id);
-    let phase = |tab_id: &String| state.borrow().agent_activity.phase(tab_id);
-    let tab = tabs
-        .iter()
-        .find(|tab_id| phase(tab_id).is_some_and(crate::agent_activity::AgentPhase::is_waiting))
-        .or_else(|| {
-            tabs.iter()
-                .find(|tab_id| phase(tab_id) == Some(crate::agent_activity::AgentPhase::Working))
-        })
-        .cloned();
-    let pane_id = tab.as_deref().and_then(|tab_id| {
-        pane::tab_candidates_for_workspace(&workspace_id, tab_id, true)
-            .into_iter()
-            .next()
-            .map(|(_, pane_id, _)| pane_id)
-    });
+    // The terminal that put it there, ranked as the previews are: waiting,
+    // unread, working, then quiet.
+    let target_tab = {
+        let s = state.borrow();
+        let panes = s
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .map(|workspace| workspace.split_container.panes())
+            .unwrap_or_default();
+        panes
+            .iter()
+            .filter_map(pane::session_tabs_in_pane)
+            .flat_map(|pane_tabs| {
+                let pane_id = pane_tabs.pane_id;
+                pane_tabs.tabs.into_iter().map(move |tab| (pane_id, tab))
+            })
+            .filter_map(|(pane_id, tab)| {
+                let phase = s.agent_activity.phase(&tab.tab_id);
+                let rank = match phase {
+                    Some(phase) if phase.is_waiting() => 0,
+                    _ if tab.unread => 1,
+                    Some(crate::agent_activity::AgentPhase::Working) => 2,
+                    Some(_) => 3,
+                    None => return None,
+                };
+                Some((rank, pane_id, tab.tab_id))
+            })
+            .min_by_key(|(rank, _, _)| *rank)
+    };
     let target = DesktopNotificationTarget {
         workspace_id,
-        pane_id,
-        tab_id: tab.filter(|_| pane_id.is_some()),
+        pane_id: target_tab.as_ref().map(|(_, pane_id, _)| *pane_id),
+        tab_id: target_tab.map(|(_, _, tab_id)| tab_id),
     };
     activate_desktop_notification_target(state, &target, None);
+}
+
+/// Click a group header's `● N` count, as the user would.
+#[cfg(test)]
+pub(super) fn click_unread_count(state: &State, group_id: &str) {
+    let button = state.borrow().group_headers[group_id].unread_button.clone();
+    assert!(button.is_visible(), "the unread count is shown");
+    button.emit_clicked();
+}
+
+/// Click a collapsed group's `+N more` row.
+#[cfg(test)]
+pub(super) fn click_more(state: &State, group_id: &str) {
+    let button = state.borrow().group_headers[group_id].more_button.clone();
+    button.emit_clicked();
 }
 
 fn update_group_header(header: &GroupHeader, group: &WorkspaceGroup) {

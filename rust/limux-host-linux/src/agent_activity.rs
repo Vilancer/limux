@@ -90,6 +90,9 @@ pub struct SurfaceActivity {
 #[derive(Debug, Default)]
 pub struct ActivityStore {
     surfaces: HashMap<String, SurfaceActivity>,
+    /// When each tab's entry was removed (its session ended or the user
+    /// closed it), so a hook from before then cannot bring it back.
+    removed_at: HashMap<String, u64>,
 }
 
 impl ActivityStore {
@@ -108,6 +111,16 @@ impl ActivityStore {
         {
             return false;
         }
+        // A late hook from before the session ended (they race over the
+        // socket) must not revive it.
+        if current.is_none()
+            && self
+                .removed_at
+                .get(&event.tab_id)
+                .is_some_and(|removed| event.at_ms < *removed)
+        {
+            return false;
+        }
         match event.phase {
             None => {
                 let same_session =
@@ -115,7 +128,7 @@ impl ActivityStore {
                         (Some(current), Some(ended)) => current == ended,
                         _ => true,
                     });
-                same_session && self.surfaces.remove(&event.tab_id).is_some()
+                same_session && self.remove(&event.tab_id, event.at_ms)
             }
             Some(phase) => {
                 let detail = event.detail.or_else(|| {
@@ -158,6 +171,7 @@ impl ActivityStore {
     pub fn retain_tabs(&mut self, mut live: impl FnMut(&str) -> bool) -> bool {
         let before = self.surfaces.len();
         self.surfaces.retain(|tab_id, _| live(tab_id));
+        self.removed_at.retain(|tab_id, _| live(tab_id));
         self.surfaces.len() != before
     }
 
@@ -244,10 +258,25 @@ impl ActivityStore {
     /// again. Only an idle one: working and waiting say what is going on.
     /// Returns whether it was dropped.
     pub fn dismiss(&mut self, tab_id: &str) -> bool {
-        if self.phase(tab_id) != Some(AgentPhase::Idle) {
+        let Some(at_ms) = self
+            .get(tab_id)
+            .filter(|activity| activity.phase == AgentPhase::Idle)
+            .map(|activity| activity.at_ms)
+        else {
             return false;
-        }
-        self.surfaces.remove(tab_id).is_some()
+        };
+        self.remove(tab_id, at_ms)
+    }
+
+    /// Drop a tab's entry, remembering when (`at_ms`, or its newest event if
+    /// later) so older events stay rejected.
+    fn remove(&mut self, tab_id: &str, at_ms: u64) -> bool {
+        let Some(removed) = self.surfaces.remove(tab_id) else {
+            return false;
+        };
+        self.removed_at
+            .insert(tab_id.to_string(), at_ms.max(removed.at_ms));
+        true
     }
 
     /// Settle working or waiting tabs that went quiet: no hook for
@@ -778,5 +807,22 @@ mod tests {
         store.apply(event("u", Some(AgentPhase::Working), None, 1_000));
         assert!(!store.keep("u", 2_000), "an agent's state is left alone");
         assert_eq!(store.phase("u"), Some(AgentPhase::Working));
+    }
+
+    #[test]
+    fn a_late_hook_from_before_the_end_does_not_revive_the_agent() {
+        let mut store = ActivityStore::default();
+        store.apply(event("t", Some(AgentPhase::Working), Some("s"), 1_000));
+        assert!(store.apply(event("t", None, Some("s"), 3_000)));
+        assert!(store.get("t").is_none());
+        // A PostToolUse sent at 2_000 arrives after the end.
+        assert!(!store.apply(event("t", Some(AgentPhase::Working), Some("s"), 2_000)));
+        assert!(store.get("t").is_none());
+        // A new session afterwards still starts.
+        assert!(store.apply(event("t", Some(AgentPhase::Working), Some("n"), 4_000)));
+        assert_eq!(store.phase("t"), Some(AgentPhase::Working));
+        // Closing the tab forgets it, so its id carries nothing over.
+        store.retain_tabs(|_| false);
+        assert!(store.apply(event("t", Some(AgentPhase::Working), None, 10)));
     }
 }
