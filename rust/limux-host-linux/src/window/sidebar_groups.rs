@@ -3,7 +3,7 @@
 //! list. The order and its rules live in `workspace_group`.
 
 use super::*;
-use crate::agent_activity::{ActivityCounts, GLYPH_UNREAD, GLYPH_WAITING, GLYPH_WORKING};
+use crate::agent_activity::{ActivityCounts, GLYPH_UNREAD, GLYPH_WAITING};
 use crate::control_bridge::GroupRequest;
 use crate::workspace_group::{
     ActivePreviews, Activity, GroupError, SidebarRow, WorkspaceGroup, ACTIVE_PREVIEW_CAP,
@@ -23,6 +23,8 @@ pub(super) struct GroupHeader {
     pill: gtk::Box,
     name_label: gtk::Label,
     count_label: gtk::Label,
+    /// The number inside the working button, next to its spinner.
+    working_count: gtk::Label,
     /// "↻ N": working terminals in the group, shown even when collapsed; a
     /// click goes to the next one.
     working_label: gtk::Button,
@@ -118,6 +120,11 @@ fn build_group_header(state: &State, group_id: &str) -> GroupHeader {
     count_label.add_css_class("limux-ws-group-count");
 
     let working_label = gtk::Button::new();
+    let working_count = gtk::Label::new(None);
+    let working_content = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    working_content.append(&agent_activity_ui::working_spinner());
+    working_content.append(&working_count);
+    working_label.set_child(Some(&working_content));
     working_label.add_css_class("flat");
     working_label.add_css_class("limux-ws-group-working");
     working_label.set_focus_on_click(false);
@@ -165,9 +172,13 @@ fn build_group_header(state: &State, group_id: &str) -> GroupHeader {
         });
     }
 
-    header_box.append(&working_label);
+    // Counts sit on the right, loudest first: waiting, unread, working.
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    header_box.append(&spacer);
     header_box.append(&waiting_button);
     header_box.append(&unread_button);
+    header_box.append(&working_label);
 
     let more_button = gtk::Button::new();
     more_button.add_css_class("flat");
@@ -199,6 +210,7 @@ fn build_group_header(state: &State, group_id: &str) -> GroupHeader {
         name_label,
         count_label,
         working_label,
+        working_count,
         waiting_button,
         unread_button,
         more_row,
@@ -214,10 +226,9 @@ fn update_group_activity(
     counts: ActivityCounts,
     unread_projects: usize,
     hidden_active: usize,
+    hidden_working_only: bool,
 ) {
-    header
-        .working_label
-        .set_label(&format!("{GLYPH_WORKING} {}", counts.working));
+    header.working_count.set_label(&counts.working.to_string());
     header.working_label.set_visible(counts.working > 0);
     let working_tip = format!(
         "{}: {} agent{} working. Go to the next one",
@@ -258,9 +269,14 @@ fn update_group_activity(
         .unread_button
         .update_property(&[gtk::accessible::Property::Label(&unread_tip)]);
 
-    header
-        .more_button
-        .set_label(&format!("{hidden_active} more"));
+    header.more_button.set_label(&format!(
+        "+{hidden_active} {} \u{203A}",
+        if hidden_working_only {
+            "working"
+        } else {
+            "more"
+        }
+    ));
     let more_tip = format!(
         "{hidden_active} more active project{} in {}. Go to the next one",
         if hidden_active == 1 { "" } else { "s" },
@@ -291,6 +307,8 @@ struct GroupActivity {
     by_group: HashMap<String, ActivityCounts>,
     /// Group id → members with unread marks.
     unread_by_group: HashMap<String, usize>,
+    /// Group id → whether every member the previews left out is only working.
+    more_working_only: HashMap<String, bool>,
 }
 
 fn group_activity(s: &AppState) -> GroupActivity {
@@ -356,10 +374,25 @@ fn group_activity(s: &AppState) -> GroupActivity {
             (group.id.clone(), count)
         })
         .collect();
+    // "+2 working ›" when everything left out is only working.
+    let more_working_only = previews
+        .more
+        .iter()
+        .map(|(group, hidden)| {
+            let working_only = hidden.iter().all(|id| {
+                !unread.contains(id.as_str())
+                    && by_workspace
+                        .get(id)
+                        .is_some_and(|counts| counts.waiting == 0 && counts.working > 0)
+            });
+            (group.clone(), working_only)
+        })
+        .collect();
     GroupActivity {
         previews,
         by_group,
         unread_by_group,
+        more_working_only,
     }
 }
 
@@ -419,9 +452,8 @@ fn update_group_header(header: &GroupHeader, group: &WorkspaceGroup) {
     header.pill.add_css_class(&group_color_class(group.color));
     let count = group.members().len();
     header.count_label.set_label(&count.to_string());
-    header
-        .count_label
-        .set_visible(group.collapsed || count == 0);
+    // The project count is in the tooltip; only an empty group says "0".
+    header.count_label.set_visible(count == 0);
     let state = if group.collapsed {
         "collapsed"
     } else {
@@ -498,6 +530,11 @@ pub(super) fn sync_sidebar(state: &State) {
                     .copied()
                     .unwrap_or_default(),
                 activity.previews.more.get(&group.id).map_or(0, Vec::len),
+                activity
+                    .more_working_only
+                    .get(&group.id)
+                    .copied()
+                    .unwrap_or(false),
             );
         }
 
@@ -574,6 +611,9 @@ pub(super) fn sync_sidebar(state: &State) {
     if let Some(row) = row_to_select {
         sidebar_list.select_row(Some(&row));
     }
+    // Collapsing or expanding a group changes which members are one-line
+    // previews.
+    sync_row_visibility(state);
 }
 
 /// Re-add `children` in order, unless the container already holds exactly them.
@@ -608,9 +648,11 @@ fn replace_children<W: IsA<gtk::Widget>>(
 /// Show or hide member rows of collapsed groups for the active workspace and
 /// the waiting ones, and refresh the groups' activity counts.
 pub(super) fn sync_row_visibility(state: &State) {
+    let mut previews_now = HashSet::new();
     let rows: Vec<(gtk::ListBoxRow, bool)> = {
         let s = state.borrow();
         let activity = group_activity(&s);
+        previews_now.clone_from(&activity.previews.shown);
         let active = s.active_workspace().map(|workspace| workspace.id.as_str());
         let mut rows = Vec::new();
         for row in s.sidebar.rows() {
@@ -640,6 +682,11 @@ pub(super) fn sync_row_visibility(state: &State) {
                                 .copied()
                                 .unwrap_or_default(),
                             hidden,
+                            activity
+                                .more_working_only
+                                .get(&group.id)
+                                .copied()
+                                .unwrap_or(false),
                         );
                         rows.push((header.more_row.clone(), group.collapsed && hidden > 0));
                     }
@@ -649,6 +696,20 @@ pub(super) fn sync_row_visibility(state: &State) {
         rows
     };
     set_rows_visible(&rows);
+    // Members shown under a collapsed group become one-line previews.
+    let changed: Vec<String> = {
+        let mut s = state.borrow_mut();
+        let changed = s
+            .preview_rows
+            .symmetric_difference(&previews_now)
+            .cloned()
+            .collect();
+        s.preview_rows = previews_now;
+        changed
+    };
+    for id in changed {
+        agent_activity_ui::refresh_session_rows(state, &id, true);
+    }
     pending_panel::sync(state);
 }
 
@@ -678,6 +739,11 @@ fn paint_group_headers(state: &State) {
                     .copied()
                     .unwrap_or_default(),
                 activity.previews.more.get(&group.id).map_or(0, Vec::len),
+                activity
+                    .more_working_only
+                    .get(&group.id)
+                    .copied()
+                    .unwrap_or(false),
             );
         }
     }

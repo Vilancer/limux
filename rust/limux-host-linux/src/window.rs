@@ -32,6 +32,7 @@ use crate::workspace_group::{Placement, RowRef, SidebarLayout};
 
 mod agent_activity_ui;
 mod gui_hooks;
+mod hooks_card;
 mod navigation_notifications;
 mod pending_panel;
 mod session_persistence;
@@ -87,6 +88,8 @@ struct Workspace {
     sessions_toggle: gtk::Button,
     /// The project's session rows, one per terminal.
     sessions_box: gtk::Box,
+    /// The row's sign spinner, preview line and age.
+    row_extras: agent_activity_ui::RowExtras,
 }
 
 #[derive(Clone)]
@@ -162,6 +165,10 @@ pub(crate) struct AppState {
     unread_dwell_epoch: u64,
     /// When each terminal tab was last on screen in an active window (Unix ms).
     tab_seen_ms: HashMap<String, u64>,
+    /// Projects shown as one-line previews under a collapsed group.
+    preview_rows: HashSet<String>,
+    /// With both bars hidden: the project's name before its tabs.
+    fullscreen_project: gtk::Label,
     /// The pending panel while it is open.
     pending_open: Option<pending_panel::OpenPanel>,
     /// Latest message and its time per terminal tab, for the pending panel.
@@ -1543,7 +1550,7 @@ const BASE_CSS: &str = r#"
     outline: none;
 }
 .limux-sidebar-row-box {
-    padding: 8px 10px 8px 10px;
+    padding: 5px 8px 5px 4px;
     border-radius: 8px;
     margin: 1px 6px;
 }
@@ -1632,18 +1639,16 @@ const BASE_CSS: &str = r#"
     font-size: 11px;
 }
 .limux-notify-msg-unread {
-    color: alpha(#f59e0b, 0.9);
-    font-size: 11px;
+    color: alpha(@window_fg_color, 0.74);
+    font-size: 12px;
 }
+/* Finished keeps its sign and a bold name; the loud card is for waiting. */
 .limux-sidebar-row-unread {
-    background-color: alpha(#f59e0b, 0.14);
-    border-left: 3px solid #f59e0b;
     border-radius: 8px;
-    margin-left: 3px;
 }
-.limux-sidebar-list row:selected .limux-sidebar-row-box.limux-sidebar-row-unread {
-    background: alpha(#f59e0b, 0.18);
-    border-left: 3px solid #f59e0b;
+.limux-sidebar-row-waiting .limux-ws-name {
+    color: @window_fg_color;
+    font-weight: 700;
 }
 .limux-sidebar-row-unread .limux-ws-name {
     color: @window_fg_color;
@@ -1751,7 +1756,7 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
         ""
     };
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         build_window_css(background_opacity),
         pane::PANE_CSS,
         crate::terminal::CLIPBOARD_TOAST_CSS,
@@ -1763,6 +1768,7 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
         sidebar_groups::workspace_group_css(),
         agent_activity_ui::agent_activity_css(),
         pending_panel::pending_panel_css(),
+        hooks_card::hooks_card_css(),
     )
 }
 
@@ -2078,6 +2084,8 @@ pub fn build_window(app: &adw::Application) {
     sidebar.append(&sidebar_drag_area);
     sidebar.append(&sidebar_header_handle);
     sidebar.append(&sidebar_scroll);
+    // Explains a sidebar without agent signs: Claude Code lacks the hooks.
+    sidebar.append(&hooks_card::build());
     let ssh_button = gtk::Button::with_label("Connect via SSH…");
     ssh_button.set_tooltip_text(Some("Open an SSH connection in a new workspace"));
     sidebar.append(&ssh_button);
@@ -2145,6 +2153,8 @@ pub fn build_window(app: &adw::Application) {
         session_views: HashMap::new(),
         unread_dwell_epoch: 0,
         tab_seen_ms: HashMap::new(),
+        preview_rows: HashSet::new(),
+        fullscreen_project: agent_activity_ui::build_fullscreen_project(),
         pending_open: None,
         tab_notes: HashMap::new(),
         workspace_notes: HashMap::new(),
@@ -3849,6 +3859,11 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
     detach(&widgets.new_ws);
     detach(&widgets.open_folder);
     detach(&widgets.pending);
+    {
+        let chip = state.borrow().fullscreen_project.clone();
+        detach(&chip);
+        chip.set_visible(false);
+    }
     detach(&widgets.minimize);
     detach(&widgets.maximize);
     detach(&widgets.close);
@@ -3988,6 +4003,10 @@ fn layout_collapsed_dock(state: &State, w: &TopBarWidgets, allow_retry: bool) {
         Some(leading) => {
             leading.append(&w.dock);
             leading.append(&w.pending);
+            // Without the sidebar and top bar, say which project this is.
+            let chip = state.borrow().fullscreen_project.clone();
+            leading.append(&chip);
+            agent_activity_ui::sync_fullscreen_project(state);
         }
         None => {
             if allow_retry {
@@ -5193,7 +5212,7 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
         app_state.sidebar_list.append(&row);
         app_state.indicator_box.append(&indicator_button);
         install_workspace_row_interactions(state, &new_workspace_id, &row, &favorite_button);
-        let (sessions_toggle, sessions_box) =
+        let (sessions_toggle, sessions_box, row_extras) =
             agent_activity_ui::attach_session_list(state, &new_workspace_id, &row);
 
         app_state.workspaces.push(Workspace {
@@ -5217,6 +5236,7 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
             indicator_unread_dot,
             sessions_toggle,
             sessions_box,
+            row_extras,
         });
         app_state
             .sidebar
@@ -5904,7 +5924,7 @@ fn break_tabs_into_new_workspace(
         app_state.sidebar_list.append(&row);
         app_state.indicator_box.append(&indicator_button);
         install_workspace_row_interactions(state, &new_workspace_id, &row, &favorite_button);
-        let (sessions_toggle, sessions_box) =
+        let (sessions_toggle, sessions_box, row_extras) =
             agent_activity_ui::attach_session_list(state, &new_workspace_id, &row);
 
         if let Some(prev_id) = app_state
@@ -5936,6 +5956,7 @@ fn break_tabs_into_new_workspace(
             indicator_unread_dot,
             sessions_toggle,
             sessions_box,
+            row_extras,
         });
         app_state
             .sidebar
@@ -7602,7 +7623,8 @@ fn add_workspace_with_initial_command(
         );
     sidebar_list.append(&row);
     install_workspace_row_interactions(state, &id, &row, &favorite_button);
-    let (sessions_toggle, sessions_box) = agent_activity_ui::attach_session_list(state, &id, &row);
+    let (sessions_toggle, sessions_box, row_extras) =
+        agent_activity_ui::attach_session_list(state, &id, &row);
     // Wire close button
     {
         let state = state.clone();
@@ -7658,6 +7680,7 @@ fn add_workspace_with_initial_command(
         indicator_unread_dot,
         sessions_toggle,
         sessions_box,
+        row_extras,
     };
 
     if workspace.favorite {

@@ -1227,7 +1227,7 @@ fn pending_panel_lists_a_finished_terminal_and_jumps_to_it() {
     );
     let counter = pending_counter(&state);
     assert!(counter.is_visible());
-    assert_eq!(counter.label().as_deref(), Some("\u{25CF} 1"));
+    assert_eq!(pending_panel::counter_text(&state), "\u{25CF} 1");
 
     assert!(dispatch_shortcut_command(
         &state,
@@ -1299,7 +1299,7 @@ fn pending_panel_reaches_a_pane_hidden_by_zoom() {
     pump_for(std::time::Duration::from_millis(1500));
     let counter = pending_counter(&state);
     assert!(counter.is_visible(), "the hidden pane counts");
-    assert_eq!(counter.label().as_deref(), Some("\u{25CF} 1"));
+    assert_eq!(pending_panel::counter_text(&state), "\u{25CF} 1");
 
     assert!(dispatch_shortcut_command(
         &state,
@@ -1348,7 +1348,7 @@ fn pending_panel_works_with_both_bars_hidden() {
             agent: "claude".to_string(),
             phase: Some(crate::agent_activity::AgentPhase::NeedsApproval),
             session_id: None,
-            at_ms: 1,
+            at_ms: crate::agent_activity::now_ms(),
             detail: Some("Bash: cargo test".to_string()),
         },
     )
@@ -1378,9 +1378,9 @@ fn pending_panel_works_with_both_bars_hidden() {
     );
     assert!(counter.is_visible());
     assert_eq!(
-        counter.label().as_deref(),
-        Some("\u{25C6} 1"),
-        "waiting wins"
+        pending_panel::counter_text(&state).as_str(),
+        "\u{25C6} 1 \u{25CF} 1",
+        "waiting and unread show together"
     );
 
     assert!(dispatch_shortcut_command(
@@ -1394,7 +1394,7 @@ fn pending_panel_works_with_both_bars_hidden() {
     pending_panel::click_mark_all(&state);
     pump_until(wait, || pending_panel::open_entry_count(&state) == Some(1));
     assert_eq!(pending_panel::open_entry_count(&state), Some(1));
-    assert_eq!(counter.label().as_deref(), Some("\u{25C6} 1"));
+    assert_eq!(pending_panel::counter_text(&state), "\u{25C6} 1");
 
     // Ctrl+Alt+P again closes it.
     assert!(dispatch_shortcut_command(
@@ -1459,7 +1459,7 @@ fn session_rows_list_terminals_as_tabs() {
             agent: "claude".to_string(),
             phase: Some(crate::agent_activity::AgentPhase::Working),
             session_id: None,
-            at_ms: 1,
+            at_ms: crate::agent_activity::now_ms(),
             detail: Some("Bash: cargo test".to_string()),
         },
     )
@@ -1702,6 +1702,20 @@ fn ux_tour_snapshots() {
     sidebar_groups::set_group_collapsed(&state, &clients_group, true).unwrap();
     pump_for(std::time::Duration::from_millis(400));
 
+    // Test terminals print nothing, so agents settle to idle after 10 s of
+    // silence; report the working ones again before the panel.
+    for (id, tab, phase, detail) in &reports {
+        if *phase == Some(Working) {
+            report(&state, id, &tab.tab_id, Working, detail);
+        }
+    }
+    report(
+        &state,
+        &limux_id,
+        &limux_first.tab_id,
+        Working,
+        "Bash: ./scripts/check.sh",
+    );
     assert!(dispatch_shortcut_command(
         &state,
         ShortcutCommand::PendingPanel
@@ -1723,5 +1737,48 @@ fn ux_tour_snapshots() {
     pump_for(std::time::Duration::from_millis(800));
     snapshot_widget(&content, "tour-7-full-screen");
     let _ = (limux_second, limux_pane);
+    window.close();
+}
+
+// Claude Code is set up here but without Limux hooks: the sidebar says how to
+// add them. The empty agents panel explains the signs.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn hooks_card_and_empty_panel_explain_themselves() {
+    let claude = tempfile::tempdir().unwrap();
+    std::fs::write(claude.path().join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+    std::env::set_var("CLAUDE_CONFIG_DIR", claude.path());
+    let (state, _temp) = pending_test_window("dev.limux.HooksCardTest");
+    show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    pump_for(std::time::Duration::from_millis(500));
+
+    let sidebar = state.borrow().sidebar_shell.clone();
+    let card = widget_tree(sidebar.upcast_ref())
+        .into_iter()
+        .find(|widget| widget.has_css_class("limux-hooks-card"))
+        .expect("the hooks card is in the sidebar");
+    assert!(
+        card.is_visible(),
+        "Claude without Limux hooks shows the card"
+    );
+    snapshot_widget(sidebar.upcast_ref(), "tour-8-no-hooks");
+
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_until(std::time::Duration::from_secs(5), || {
+        pending_panel::open_entry_count(&state).is_some()
+    });
+    assert_eq!(pending_panel::open_entry_count(&state), Some(0));
+    pump_for(std::time::Duration::from_millis(300));
+    let popover = pending_panel::open_popover(&state).unwrap();
+    let legend = widget_tree(popover.upcast_ref())
+        .into_iter()
+        .any(|widget| widget.has_css_class("limux-pending-legend"));
+    assert!(legend, "the empty panel shows the legend");
+    snapshot_widget(popover.upcast_ref(), "tour-9-empty-panel");
+
+    let window = state.borrow().window.clone();
     window.close();
 }

@@ -946,66 +946,153 @@ pub fn terminal_tabs_by_id() -> std::collections::HashMap<String, bool> {
     })
 }
 
-/// What an agent in a terminal tab is doing, as a small sign in its tab.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What an agent in a terminal tab is doing, shown in its tab.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabAgentSign {
-    pub glyph: &'static str,
-    pub css_class: &'static str,
-    pub tooltip: &'static str,
+    /// Waiting for the user.
+    pub waiting: bool,
+    /// Working on a prompt. Neither: the agent is idle (no sign).
+    pub working: bool,
+    pub tooltip: String,
+    /// The name an untitled tab gets ("Claude", "Claude 2").
+    pub fallback_title: Option<String>,
+    /// What it does, shown after the name while the tab is in the background.
+    pub detail: Option<String>,
 }
 
 const TAB_AGENT_SIGN_CSS_CLASS: &str = "limux-tab-agent-sign";
+const TAB_AGENT_DETAIL_CSS_CLASS: &str = "limux-tab-agent-detail";
+const TAB_WAITING_CSS_CLASS: &str = "limux-tab-waiting";
 
-/// Set the agent sign of every terminal tab from `sign_of(tab_id)`; `None`
-/// hides it. The sign sits next to the unread dot.
+/// The tab's agent sign box (a ◆ label and a spinner), created on first use
+/// next to the unread dot.
+fn tab_agent_sign_box(entry: &TabEntry, create: bool) -> Option<gtk::Box> {
+    if let Some(existing) = entry
+        .unread_dot
+        .next_sibling()
+        .and_downcast::<gtk::Box>()
+        .filter(|widget| widget.has_css_class(TAB_AGENT_SIGN_CSS_CLASS))
+    {
+        return Some(existing);
+    }
+    if !create {
+        return None;
+    }
+    let parent = entry.unread_dot.parent().and_downcast::<gtk::Box>()?;
+    let sign = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    sign.add_css_class(TAB_AGENT_SIGN_CSS_CLASS);
+    sign.set_can_target(false);
+    let glyph = gtk::Label::new(Some("\u{25C6}"));
+    glyph.add_css_class("limux-session-waiting");
+    sign.append(&glyph);
+    let spinner = gtk::Spinner::new();
+    spinner.set_size_request(10, 10);
+    spinner.set_valign(gtk::Align::Center);
+    spinner.add_css_class("limux-working-spinner");
+    sign.append(&spinner);
+    parent.insert_child_after(&sign, Some(&entry.unread_dot));
+    Some(sign)
+}
+
+fn tab_agent_detail_label(entry: &TabEntry, create: bool) -> Option<gtk::Label> {
+    if let Some(existing) = entry
+        .title_label
+        .next_sibling()
+        .and_downcast::<gtk::Label>()
+        .filter(|widget| widget.has_css_class(TAB_AGENT_DETAIL_CSS_CLASS))
+    {
+        return Some(existing);
+    }
+    if !create {
+        return None;
+    }
+    let parent = entry.title_label.parent().and_downcast::<gtk::Box>()?;
+    let detail = gtk::Label::new(None);
+    detail.add_css_class(TAB_AGENT_DETAIL_CSS_CLASS);
+    detail.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    detail.set_max_width_chars(22);
+    detail.set_can_target(false);
+    parent.insert_child_after(&detail, Some(&entry.title_label));
+    Some(detail)
+}
+
+/// Show each terminal tab's agent state from `sign_of(tab_id)` (`None`
+/// clears it): a ◆ or a spinner next to the unread dot, a rose underline
+/// while it waits, a name when the tab has none, and what it does after the
+/// name while it is in the background.
 pub fn sync_tab_agent_signs(mut sign_of: impl FnMut(&str) -> Option<TabAgentSign>) {
     PANE_REGISTRY.with(|registry| {
         for internals in registry.borrow().values().filter_map(|weak| weak.upgrade()) {
-            for entry in &internals.tab_state.borrow().tabs {
+            let tabs = internals.tab_state.borrow();
+            let active_tab = tabs.active_tab.clone();
+            for entry in &tabs.tabs {
                 if !matches!(entry.kind, TabKind::Terminal { .. }) {
                     continue;
                 }
                 let sign = sign_of(&entry.id);
-                let existing = entry
-                    .unread_dot
-                    .next_sibling()
-                    .and_downcast::<gtk::Label>()
-                    .filter(|label| label.has_css_class(TAB_AGENT_SIGN_CSS_CLASS));
-                let label = match (existing, sign) {
-                    (Some(label), _) => label,
-                    (None, None) => continue,
-                    (None, Some(_)) => {
-                        let label = gtk::Label::new(None);
-                        label.add_css_class(TAB_AGENT_SIGN_CSS_CLASS);
-                        label.set_can_target(false);
-                        let Some(parent) = entry.unread_dot.parent().and_downcast::<gtk::Box>()
-                        else {
-                            continue;
-                        };
-                        parent.insert_child_after(&label, Some(&entry.unread_dot));
-                        label
+                let waiting = sign.as_ref().is_some_and(|sign| sign.waiting);
+                let working = sign.as_ref().is_some_and(|sign| sign.working);
+                if let Some(sign_box) = tab_agent_sign_box(entry, waiting || working) {
+                    let glyph = sign_box.first_child();
+                    let spinner = sign_box.last_child().and_downcast::<gtk::Spinner>();
+                    if let Some(glyph) = glyph {
+                        glyph.set_visible(waiting);
                     }
-                };
-                for class in ["limux-session-waiting", "limux-session-working"] {
-                    label.remove_css_class(class);
+                    if let Some(spinner) = spinner {
+                        spinner.set_visible(working);
+                        spinner.set_spinning(working);
+                    }
+                    sign_box.set_visible(waiting || working);
                 }
-                match sign {
-                    Some(sign) => {
-                        label.set_label(sign.glyph);
-                        label.add_css_class(sign.css_class);
-                        entry.tab_button.set_tooltip_text(Some(sign.tooltip));
-                        label.set_visible(true);
+                if waiting {
+                    entry.tab_button.add_css_class(TAB_WAITING_CSS_CLASS);
+                } else {
+                    entry.tab_button.remove_css_class(TAB_WAITING_CSS_CLASS);
+                }
+                entry.tab_button.set_tooltip_text(
+                    sign.as_ref()
+                        .filter(|_| waiting || working)
+                        .map(|sign| sign.tooltip.as_str()),
+                );
+
+                // An untitled tab takes the agent's name; a program's own
+                // title or a custom name always wins.
+                if entry.custom_name.is_none() && entry.automatic_title.is_none() {
+                    let title = sign
+                        .as_ref()
+                        .and_then(|sign| sign.fallback_title.as_deref())
+                        .unwrap_or(DEFAULT_TERMINAL_TITLE);
+                    if entry.title_label.label() != title {
+                        entry.title_label.set_label(title);
                     }
-                    None => {
-                        if label.is_visible() {
-                            entry.tab_button.set_tooltip_text(None);
-                        }
-                        label.set_visible(false);
-                    }
+                }
+
+                let background = active_tab.as_deref() != Some(entry.id.as_str());
+                let detail = sign
+                    .as_ref()
+                    .and_then(|sign| sign.detail.as_deref())
+                    .filter(|_| background && (waiting || working));
+                if let Some(label) = tab_agent_detail_label(entry, detail.is_some()) {
+                    label.set_label(detail.unwrap_or_default());
+                    label.set_visible(detail.is_some());
                 }
             }
         }
     })
+}
+
+/// Whether a held (exited) terminal of the workspace is still unread.
+pub fn workspace_has_exited_unread_tab(workspace_id: &str) -> bool {
+    pane_internals_for_workspace(workspace_id)
+        .into_iter()
+        .any(|internals| {
+            internals.tab_state.borrow().tabs.iter().any(|entry| {
+                entry.unread
+                    && entry
+                        .title_label
+                        .has_css_class(exit_hold::EXITED_TAB_CSS_CLASS)
+            })
+        })
 }
 
 /// Terminal tab ids of a workspace, including panes hidden by zoom.

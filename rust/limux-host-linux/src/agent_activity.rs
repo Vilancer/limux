@@ -67,6 +67,8 @@ pub struct SurfaceActivity {
     pub phase: AgentPhase,
     pub session_id: Option<String>,
     pub at_ms: u64,
+    /// When the current phase began (Unix ms), for "working for 3m".
+    pub since_ms: u64,
     pub detail: Option<String>,
 }
 
@@ -102,11 +104,15 @@ impl ActivityStore {
                         .filter(|current| current.phase == phase)
                         .and_then(|current| current.detail.clone())
                 });
+                let since_ms = current
+                    .filter(|current| current.phase == phase)
+                    .map_or(event.at_ms, |current| current.since_ms);
                 let next = SurfaceActivity {
                     agent: event.agent,
                     phase,
                     session_id: event.session_id,
                     at_ms: event.at_ms,
+                    since_ms,
                     detail,
                 };
                 let changed = current.is_none_or(|current| {
@@ -163,6 +169,7 @@ impl ActivityStore {
             }
             if silent_ms(tab_id).is_some_and(|silent| silent >= QUIET_AFTER_MS) {
                 activity.phase = AgentPhase::Idle;
+                activity.since_ms = now_ms;
                 activity.detail = None;
                 changed = true;
             }
@@ -262,6 +269,8 @@ pub fn counts_summary(counts: ActivityCounts) -> Option<String> {
 pub enum PendingKind {
     Waiting,
     Unread,
+    /// Listed last and compact: nothing to act on, but one click away.
+    Working,
 }
 
 /// Order pending entries `(kind, at_ms, item)`: waiting first, then unread,
@@ -578,5 +587,20 @@ mod tests {
         // Seen after it asked, then silent: answered or denied there.
         assert!(store.settle_quiet(20_000, silent, |_, at| at <= 5_000));
         assert_eq!(store.phase("asked"), Some(AgentPhase::Idle));
+    }
+
+    #[test]
+    fn a_phase_keeps_its_start_time_while_it_lasts() {
+        let mut store = ActivityStore::default();
+        store.apply(event("t", Some(AgentPhase::Working), Some("s"), 1_000));
+        store.apply(event("t", Some(AgentPhase::Working), Some("s"), 5_000));
+        assert_eq!(store.get("t").unwrap().since_ms, 1_000);
+        store.apply(event(
+            "t",
+            Some(AgentPhase::NeedsApproval),
+            Some("s"),
+            7_000,
+        ));
+        assert_eq!(store.get("t").unwrap().since_ms, 7_000);
     }
 }

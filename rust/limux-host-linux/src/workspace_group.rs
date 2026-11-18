@@ -86,8 +86,9 @@ impl SidebarRow<'_> {
     }
 }
 
-/// Active workspaces a collapsed group shows below its header.
-pub const ACTIVE_PREVIEW_CAP: usize = 3;
+/// Active workspaces a collapsed group shows below its header, as one-line
+/// previews.
+pub const ACTIVE_PREVIEW_CAP: usize = 5;
 
 /// How much a workspace in a collapsed group asks to stay visible.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

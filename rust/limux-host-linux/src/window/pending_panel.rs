@@ -11,6 +11,10 @@
 use super::*;
 use crate::agent_activity::{self, PendingKind, GLYPH_UNREAD, GLYPH_WAITING};
 
+const GLYPH_EXITED: &str = "\u{2715}"; // ✕
+/// Entries that get a number key (1-9), counted from the top.
+const NUMBERED_ENTRIES: usize = 9;
+
 /// Rows visible before the list scrolls.
 const VISIBLE_ROWS: i32 = 8;
 const ROW_HEIGHT: i32 = 50;
@@ -36,12 +40,27 @@ pub(super) struct PendingEntry {
     tab_id: Option<String>,
     title: String,
     message: String,
+    /// A held terminal whose process ended.
+    exited: bool,
 }
 
 /// The toolbar counter. Placed by `apply_top_bar_mode` next to the folder
 /// button, or beside the sidebar toggle when both bars are hidden.
 pub(super) fn build_counter() -> gtk::Button {
     let counter = gtk::Button::new();
+    // ◆ waiting, ● unread, and working only while nothing else is pending.
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    for class in [
+        "limux-pending-count-waiting",
+        "limux-pending-count-unread",
+        "limux-pending-count-working",
+    ] {
+        let label = gtk::Label::new(None);
+        label.add_css_class(class);
+        label.set_visible(false);
+        content.append(&label);
+    }
+    counter.set_child(Some(&content));
     counter.add_css_class("flat");
     counter.add_css_class("limux-pending-counter");
     counter.set_focus_on_click(false);
@@ -96,7 +115,9 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                 any_tab_unread |= tab.unread;
                 let activity = s.agent_activity.get(&tab.tab_id);
                 let waiting = activity.is_some_and(|activity| activity.phase.is_waiting());
-                if !waiting && !tab.unread {
+                let working = activity
+                    .is_some_and(|activity| activity.phase == agent_activity::AgentPhase::Working);
+                if !waiting && !tab.unread && !working {
                     continue;
                 }
                 let note = s.tab_notes.get(&tab.tab_id);
@@ -113,8 +134,16 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                         .unwrap_or_else(|| fallback.to_string());
                     (
                         PendingKind::Waiting,
-                        activity.map_or(0, |activity| activity.at_ms),
+                        activity.map_or(0, |activity| activity.since_ms),
                         message,
+                    )
+                } else if !tab.unread {
+                    (
+                        PendingKind::Working,
+                        activity.map_or(0, |activity| activity.since_ms),
+                        activity
+                            .and_then(|activity| activity.detail.clone())
+                            .unwrap_or_else(|| "Working".to_string()),
                     )
                 } else {
                     (
@@ -138,6 +167,7 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                         tab.title
                     },
                     message,
+                    exited: tab.exited,
                 });
             }
         }
@@ -153,6 +183,7 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                 pane_id: None,
                 tab_id: None,
                 title: String::new(),
+                exited: false,
                 message: note.map_or_else(
                     || {
                         if workspace.manual_unread {
@@ -185,26 +216,35 @@ pub(super) fn sync(state: &State) {
         return;
     };
     let entries = pending_entries(state);
-    let waiting = entries
-        .iter()
-        .filter(|entry| entry.kind == PendingKind::Waiting)
-        .count();
-    let unread = entries.len() - waiting;
+    let count = |kind| entries.iter().filter(|entry| entry.kind == kind).count();
+    let (waiting, unread, working) = (
+        count(PendingKind::Waiting),
+        count(PendingKind::Unread),
+        count(PendingKind::Working),
+    );
     if entries.is_empty() {
         counter.set_visible(false);
     } else {
-        let (glyph, count) = if waiting > 0 {
-            (GLYPH_WAITING, waiting)
-        } else {
-            (GLYPH_UNREAD, unread)
-        };
-        counter.set_label(&format!("{glyph} {count}"));
+        let parts = [
+            (waiting > 0).then(|| format!("{GLYPH_WAITING} {waiting}")),
+            (unread > 0).then(|| format!("{GLYPH_UNREAD} {unread}")),
+            (waiting == 0 && unread == 0).then(|| format!("{GLYPH_WORKING_TEXT} {working}")),
+        ];
+        let mut child = counter.child().and_then(|content| content.first_child());
+        for part in parts {
+            let Some(label) = child.and_downcast::<gtk::Label>() else {
+                break;
+            };
+            label.set_label(part.as_deref().unwrap_or_default());
+            label.set_visible(part.is_some());
+            child = label.next_sibling();
+        }
         if waiting > 0 {
             counter.add_css_class("limux-pending-counter-waiting");
         } else {
             counter.remove_css_class("limux-pending-counter-waiting");
         }
-        let tip = summary_text(waiting, unread);
+        let tip = summary_text(waiting, unread, working);
         counter.set_tooltip_text(Some(&format!("{tip} (Ctrl+Alt+P)")));
         counter.update_property(&[gtk::accessible::Property::Label(&format!("Pending: {tip}"))]);
         counter.set_visible(true);
@@ -245,12 +285,23 @@ fn refresh_ages(state: &State) {
     }
 }
 
-fn summary_text(waiting: usize, unread: usize) -> String {
-    match (waiting, unread) {
-        (0, 0) => "Nothing pending".to_string(),
-        (0, unread) => format!("{unread} unread"),
-        (waiting, 0) => format!("{waiting} waiting for you"),
-        (waiting, unread) => format!("{waiting} waiting for you, {unread} unread"),
+const GLYPH_WORKING_TEXT: &str = agent_activity::GLYPH_WORKING;
+
+fn summary_text(waiting: usize, unread: usize, working: usize) -> String {
+    let mut parts = Vec::new();
+    if waiting > 0 {
+        parts.push(format!("{waiting} waiting for you"));
+    }
+    if unread > 0 {
+        parts.push(format!("{unread} unread"));
+    }
+    if working > 0 {
+        parts.push(format!("{working} working"));
+    }
+    if parts.is_empty() {
+        "No agents".to_string()
+    } else {
+        parts.join(", ")
     }
 }
 
@@ -299,7 +350,7 @@ fn open_panel(state: &State) {
         return;
     };
 
-    let title = gtk::Label::new(Some("Pending"));
+    let title = gtk::Label::new(Some("Agents"));
     title.add_css_class("limux-pending-title");
     title.set_xalign(0.0);
     title.set_hexpand(true);
@@ -320,14 +371,20 @@ fn open_panel(state: &State) {
         .child(&list)
         .build();
 
-    // The section headings already say what is waiting and what is unread.
+    // The section headings already say what is waiting and what is unread;
+    // the footer says how to move.
+    let keys = gtk::Label::new(Some(
+        "\u{2191}\u{2193} Enter open \u{00B7} 1-9 jump \u{00B7} Esc",
+    ));
+    keys.add_css_class("limux-pending-dim");
+    keys.set_xalign(0.0);
+    keys.set_hexpand(true);
     let mark_all = gtk::Button::with_label("Mark all read");
     mark_all.add_css_class("limux-pending-mark-all");
     mark_all.set_focus_on_click(false);
-    mark_all.set_halign(gtk::Align::End);
-    mark_all.set_hexpand(true);
     let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     footer.add_css_class("limux-pending-footer");
+    footer.append(&keys);
     footer.append(&mark_all);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -350,6 +407,26 @@ fn open_panel(state: &State) {
     {
         let state = state.clone();
         list.connect_row_activated(move |_, row| activate_row(&state, row));
+    }
+    {
+        // 1-9 jump to the numbered entries.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let state = state.clone();
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            let plain = !modifiers.intersects(
+                gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK,
+            );
+            let digit = key.to_unicode().and_then(|c| c.to_digit(10));
+            match digit {
+                Some(n @ 1..=9) if plain => {
+                    activate_number(&state, n as usize);
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+        content.add_controller(keys);
     }
     {
         let state = state.clone();
@@ -438,12 +515,44 @@ fn fill_list(
     mark_all.set_sensitive(unread > 0);
 
     if entries.is_empty() {
-        let empty = gtk::Label::new(Some("Nothing pending"));
-        empty.add_css_class("limux-pending-empty");
+        // Nothing to list: say what the signs mean instead.
+        let legend = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        legend.add_css_class("limux-pending-legend");
+        let heading = gtk::Label::new(Some("No agents need you."));
+        heading.set_xalign(0.0);
+        legend.append(&heading);
+        for (glyph, class, text) in [
+            (
+                GLYPH_WAITING,
+                "limux-pending-glyph-waiting",
+                "Waiting for you: approval or a question",
+            ),
+            (
+                GLYPH_UNREAD,
+                "limux-pending-glyph",
+                "Finished, not seen yet",
+            ),
+            (
+                agent_activity::GLYPH_WORKING,
+                "limux-pending-dim",
+                "Working",
+            ),
+            (GLYPH_EXITED, "limux-pending-dim", "Exited"),
+        ] {
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let sign = gtk::Label::new(Some(glyph));
+            sign.set_size_request(16, -1);
+            sign.add_css_class(class);
+            let label = gtk::Label::new(Some(text));
+            label.set_xalign(0.0);
+            line.append(&sign);
+            line.append(&label);
+            legend.append(&line);
+        }
         let row = gtk::ListBoxRow::new();
         row.set_activatable(false);
         row.set_selectable(false);
-        row.set_child(Some(&empty));
+        row.set_child(Some(&legend));
         list.append(&row);
         return Vec::new();
     }
@@ -454,10 +563,15 @@ fn fill_list(
     for (index, entry) in entries.iter().enumerate() {
         if section != Some(entry.kind) {
             section = Some(entry.kind);
-            let label = gtk::Label::new(Some(match entry.kind {
-                PendingKind::Waiting => "WAITING FOR YOU",
-                PendingKind::Unread => "FINISHED",
-            }));
+            let in_section = entries.iter().filter(|e| e.kind == entry.kind).count();
+            let label = gtk::Label::new(Some(&format!(
+                "{} \u{00B7} {in_section}",
+                match entry.kind {
+                    PendingKind::Waiting => "WAITING FOR YOU",
+                    PendingKind::Unread => "FINISHED",
+                    PendingKind::Working => "WORKING",
+                }
+            )));
             label.set_xalign(0.0);
             label.add_css_class("limux-pending-section");
             let row = gtk::ListBoxRow::new();
@@ -474,13 +588,19 @@ fn fill_list(
 }
 
 fn entry_row(entry: &PendingEntry, index: usize, now: u64) -> (gtk::ListBoxRow, gtk::Label) {
+    if entry.kind == PendingKind::Working {
+        return working_row(entry, index, now);
+    }
     let glyph = gtk::Label::new(Some(match entry.kind {
         PendingKind::Waiting => GLYPH_WAITING,
-        PendingKind::Unread => GLYPH_UNREAD,
+        _ if entry.exited => GLYPH_EXITED,
+        _ => GLYPH_UNREAD,
     }));
     glyph.add_css_class("limux-pending-glyph");
     if entry.kind == PendingKind::Waiting {
         glyph.add_css_class("limux-pending-glyph-waiting");
+    } else if entry.exited {
+        glyph.add_css_class("limux-pending-glyph-exited");
     }
     glyph.set_valign(gtk::Align::Start);
 
@@ -508,13 +628,22 @@ fn entry_row(entry: &PendingEntry, index: usize, now: u64) -> (gtk::ListBoxRow, 
 
     let age = gtk::Label::new(Some(&agent_activity::ago_label(now, entry.at_ms)));
     age.add_css_class("limux-pending-dim");
-    age.set_valign(gtk::Align::Start);
+    age.set_xalign(1.0);
+    let right = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    right.set_valign(gtk::Align::Start);
+    right.append(&age);
+    if index < NUMBERED_ENTRIES {
+        let key = gtk::Label::new(Some(&(index + 1).to_string()));
+        key.add_css_class("limux-pending-key");
+        key.set_halign(gtk::Align::End);
+        right.append(&key);
+    }
 
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     content.add_css_class("limux-pending-row-box");
     content.append(&glyph);
     content.append(&text);
-    content.append(&age);
+    content.append(&right);
 
     let row = gtk::ListBoxRow::new();
     row.add_css_class("limux-pending-row");
@@ -536,6 +665,78 @@ fn entry_row(entry: &PendingEntry, index: usize, now: u64) -> (gtk::ListBoxRow, 
     row.set_tooltip_text(Some(&spoken));
     row.update_property(&[gtk::accessible::Property::Label(&spoken)]);
     (row, age)
+}
+
+/// A working agent: one compact line (spinner, project, what it does, age).
+fn working_row(entry: &PendingEntry, index: usize, now: u64) -> (gtk::ListBoxRow, gtk::Label) {
+    // A glyph, not a spinner: a spinner here did not appear in offscreen
+    // snapshots of the popover, and a column of spinners is noisy anyway.
+    let spinner = gtk::Label::new(Some(agent_activity::GLYPH_WORKING));
+    spinner.add_css_class("limux-pending-dim");
+    spinner.set_size_request(16, -1);
+    let name = if entry.title.is_empty() {
+        format!("<b>{}</b>", glib::markup_escape_text(&entry.workspace_name))
+    } else {
+        format!(
+            "<b>{}</b> \u{00B7} {}",
+            glib::markup_escape_text(&entry.workspace_name),
+            glib::markup_escape_text(&entry.title)
+        )
+    };
+    let text = gtk::Label::new(None);
+    text.set_markup(&format!(
+        "{name}  <span alpha=\"70%\">{}</span>",
+        glib::markup_escape_text(&entry.message)
+    ));
+    text.set_xalign(0.0);
+    text.set_hexpand(true);
+    text.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let age = gtk::Label::new(Some(&agent_activity::ago_label(now, entry.at_ms)));
+    age.add_css_class("limux-pending-dim");
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    content.add_css_class("limux-pending-row-box");
+    content.add_css_class("limux-pending-row-compact");
+    content.append(&spinner);
+    content.append(&text);
+    content.append(&age);
+    let row = gtk::ListBoxRow::new();
+    row.add_css_class("limux-pending-row");
+    if let Some(color) = entry.group_color {
+        row.add_css_class(&sidebar_groups::group_color_class(color));
+    }
+    row.set_child(Some(&content));
+    row.set_widget_name(&format!("pending-{index}"));
+    let spoken = format!("{}, working: {}", entry.workspace_name, entry.message);
+    row.set_tooltip_text(Some(&spoken));
+    row.update_property(&[gtk::accessible::Property::Label(&spoken)]);
+    (row, age)
+}
+
+/// The number keys: jump to the `n`-th entry (1-based) when it has a number.
+fn activate_number(state: &State, n: usize) {
+    let row = {
+        let s = state.borrow();
+        let Some(open) = s.pending_open.as_ref() else {
+            return;
+        };
+        if n == 0 || n > NUMBERED_ENTRIES || n > open.entries.len() {
+            return;
+        }
+        let name = format!("pending-{}", n - 1);
+        let mut found = None;
+        let mut index = 0;
+        while let Some(row) = open.list.row_at_index(index) {
+            if row.widget_name() == name {
+                found = Some(row);
+                break;
+            }
+            index += 1;
+        }
+        found
+    };
+    if let Some(row) = row {
+        activate_row(state, &row);
+    }
 }
 
 fn activate_row(state: &State, row: &gtk::ListBoxRow) {
@@ -595,6 +796,25 @@ pub(super) fn open_entry_count(state: &State) -> Option<usize> {
     let s = state.borrow();
     let open = s.pending_open.as_ref()?;
     open.popover.is_visible().then_some(open.entries.len())
+}
+
+/// The counter's visible text ("◆ 1 ● 2"), for tests.
+#[cfg(test)]
+pub(super) fn counter_text(state: &State) -> String {
+    let Some(counter) = state.borrow().top_bar_pending_btn.clone() else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    let mut child = counter.child().and_then(|content| content.first_child());
+    while let Some(widget) = child {
+        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+            if label.is_visible() {
+                parts.push(label.label().to_string());
+            }
+        }
+        child = widget.next_sibling();
+    }
+    parts.join(" ")
 }
 
 /// The open panel's popover, for snapshots.
@@ -694,6 +914,32 @@ pub(super) fn pending_panel_css() -> &'static str {
     min-height: 0;
     padding: 2px 8px;
     font-size: 11px;
+}
+.limux-pending-key {
+    font-family: monospace;
+    font-size: 10px;
+    padding: 0 4px;
+    border-radius: 4px;
+    background: alpha(@window_fg_color, 0.1);
+    color: alpha(@window_fg_color, 0.7);
+}
+.limux-pending-row-box.limux-pending-row-compact {
+    padding-top: 3px;
+    padding-bottom: 3px;
+    min-height: 22px;
+    font-size: 12.5px;
+}
+.limux-pending-legend {
+    padding: 12px 14px;
+    font-size: 12.5px;
+}
+.limux-pending-glyph-exited {
+    color: alpha(@window_fg_color, 0.8);
+    font-weight: 700;
+}
+.limux-pending-count-working {
+    font-weight: 400;
+    color: alpha(@window_fg_color, 0.6);
 }
 "#
 }

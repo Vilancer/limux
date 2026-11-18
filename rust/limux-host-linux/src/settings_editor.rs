@@ -116,17 +116,22 @@ pub fn ui_scale_css(config: &AppConfig) -> String {
     let w = config.appearance.unread_color.waiting_css_color();
     rules.push(format!(
         ".limux-indicator-unread-dot, .limux-notify-dot, .limux-tab-unread-dot, \
-         .limux-session-unread, .limux-pending-glyph {{ color: {c}; }}\n\
+         .limux-session-unread, .limux-pending-glyph, .limux-pending-count-unread {{ color: {c}; }}\n\
          .limux-notify-dot-waiting, .limux-indicator-waiting-dot, .limux-session-waiting, \
-         .limux-ws-group-needs-you, .limux-pending-glyph-waiting {{ color: {w}; }}\n\
+         .limux-ws-group-needs-you, .limux-pending-glyph-waiting, \
+         .limux-pending-count-waiting {{ color: {w}; }}\n\
          .limux-session-glyph.limux-session-unread {{ color: {c}; }}\n\
-         .limux-session-glyph.limux-session-waiting, .limux-session-detail.limux-session-waiting, \
-         .limux-ws-activity-line.limux-session-waiting {{ color: {w}; }}\n\
-         .limux-pending-counter-waiting {{ color: {w}; background: alpha({w}, 0.18); \
-         box-shadow: inset 0 0 0 1px alpha({w}, 0.5); }}\n\
-         .limux-notify-msg-unread {{ color: alpha({c}, 0.9); }}\n\
-         .limux-sidebar-row-unread {{ background-color: alpha({c}, 0.14); border-left: 3px solid {c}; }}\n\
-         .limux-sidebar-list row:selected .limux-sidebar-row-box.limux-sidebar-row-unread {{ background: alpha({c}, 0.18); border-left: 3px solid {c}; }}"
+         .limux-session-glyph.limux-session-waiting {{ color: {w}; }}\n\
+         .limux-pending-counter-waiting {{ background: alpha({w}, 0.16); \
+         box-shadow: inset 0 0 0 1px {w}; }}\n\
+         .limux-sidebar-row-waiting {{ background-color: alpha({w}, 0.17); \
+         box-shadow: inset 3px 0 0 0 {w}; }}\n\
+         .limux-sidebar-list row:selected .limux-sidebar-row-box.limux-sidebar-row-waiting {{ \
+         background: alpha({w}, 0.22); \
+         box-shadow: inset 3px 0 0 0 {w}, inset 0 0 0 2px alpha(@window_fg_color, 0.9); }}\n\
+         .limux-session-row.limux-session-row-waiting {{ background: alpha({w}, 0.2); \
+         border-top-color: {w}; }}\n\
+         .limux-tab-waiting {{ box-shadow: inset 0 -2px 0 0 {w}; }}"
     ));
     rules.join("\n")
 }

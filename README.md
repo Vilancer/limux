@@ -411,40 +411,54 @@ its hooks when a session starts, so restart running sessions afterwards.
 |---|---|
 | `◆` | An agent asked for permission or a question and waits for you (rose) |
 | `●` | Unread: an agent finished a reply, or a terminal notified (the unread colour) |
-| `↻` | An agent is working on a prompt (grey) |
+| spinner | An agent is working on a prompt (grey; still when animations are off) |
+| `✕` | A terminal's process ended while you were away |
 
-Waiting has its own colour so it never looks like unread: rose, or amber when
-the unread colour is set to rose. The same sign shows in the terminal's tab.
+Loudness follows urgency: a project that waits for you is a tinted rose card,
+a finished one keeps its `●` and a bold name, and a working one is grey. Waiting
+has its own colour so it never looks like unread: rose, or amber when the
+unread colour is set to rose. The sign always sits in the same column, on
+project rows and on terminal tabs.
 
 - A project row and its top-bar pill show one sign: waiting over unread over
-  working. The pill shows only waiting and unread.
-- A group header shows `↻ N` working and `◆ N` waiting terminals and `● N`
-  unread projects, also when the group is collapsed. Clicking a count goes to
-  the group's next such terminal.
-- A collapsed group keeps up to three active projects visible below its
-  header, waiting ones first, then finished (unread) ones, then working ones;
-  the selected project is not
-  counted. Past three, a **N more** row goes to the next one. Clicking `↻ N` on
-  the header goes to the group's next working terminal, without expanding it.
+  working. The pill shows only waiting and unread. The row also says how long
+  that state has lasted (`3m`).
+- A group header shows `◆ N` waiting terminals, `● N` unread projects and
+  working terminals, on the right, also when the group is collapsed. Clicking a
+  count goes to the group's next such terminal without expanding it. The
+  project count is in the header's tooltip.
+- A collapsed group stays compact: up to five active projects show as one
+  line each (sign, name, what it does or says, age), waiting ones first, then
+  finished, then working; the selected project is not counted. Past five, a
+  `+N working ›` (or `+N more ›`) row goes to the next one.
 - `Ctrl+Alt+U` goes to the next terminal waiting for you, or to the next unread
   terminal when nothing waits.
-- A counter next to the folder button shows `◆ N` while terminals wait for you,
-  else `● N` unread, and hides when nothing is pending. It follows the toolbar:
-  the top bar, the sidebar header, or, with both hidden (full screen), the
-  terminal's header next to the sidebar toggle. Clicking it or pressing
-  `Ctrl+Alt+P` opens a list of those terminals, waiting ones first, newest
-  first, each with its project, the question or command it waits on (or its
-  latest message), and how long ago. Picking one
+- A counter next to the folder button shows `◆ N` and `● N` together, or the
+  working count while nothing else is pending, and hides when no agent is
+  active. It follows the toolbar: the top bar, the sidebar header, or, with
+  both hidden (full screen), the terminal's header next to the sidebar toggle,
+  where the project's name then sits before the tabs. Clicking it or pressing
+  `Ctrl+Alt+P` opens **Agents**: waiting, finished and working terminals, each
+  with its project, the question or command it waits on (or its latest
+  message), and how long ago. Picking one, or pressing its number `1`-`9`,
   focuses that terminal without expanding its group. **Mark all read** clears
-  unread marks only; a waiting terminal stays until the agent continues.
+  unread marks only; a waiting terminal stays until the agent continues. With
+  nothing to list it explains the signs.
 - Under a project with one working or waiting terminal, a line says what it
   does or asks: the tool it just ran (`Bash: cargo test`), the prompt it got,
-  or its question. With two or more active terminals (working, waiting or
-  unread), each shows as a small tab with that line. The `▸` shows every
-  terminal, split panes in order with a line between panes; there the tab on
-  screen is marked and background tabs are dimmed. Hovering a terminal outlines
-  its pane, and clicking it focuses that exact tab. Idle agents and plain
-  shells get no sign.
+  or its question. With two or more active terminals each shows as a small tab
+  with that line and its age. A project with two or more terminals has a
+  `3 ▾` button that lists every terminal, split panes in order with a line
+  between panes; there the tab on screen is marked and background tabs are
+  dimmed. Hovering a terminal outlines its pane, and clicking it focuses that
+  exact tab. Idle agents and plain shells get no sign.
+- In the tab bar, a waiting terminal's tab is underlined in rose, a background
+  agent tab shows what it does after its name, and an untitled agent tab is
+  named after the agent (`Claude`, `Claude 2`) until the program sets a title.
+- When Claude Code is set up but its Limux hooks are not, a card at the bottom
+  of the sidebar names the command to run. It can be dismissed.
+- A screen reader hears when a terminal starts waiting for you (GTK 4.14 and
+  newer).
 - Looking at a waiting terminal does not clear it; only the agent continuing
   does. Unread clears after a project has been on screen for about a second, so
   passing through projects with `Ctrl+Alt+PageDown` keeps their marks.
@@ -452,8 +466,9 @@ the unread colour is set to rose. The same sign shows in the terminal's tab.
   or kill it. A working terminal that has printed nothing for 10 seconds
   (Claude Code keeps redrawing while it works or waits) is therefore shown as
   idle. A waiting one only if you have had it on screen since it asked, so a
-  question you have not seen never disappears on its own. This needs **Settings > General > Tab activity indicators** (on by
-  default), which tracks terminal output.
+  question you have not seen never disappears on its own. This needs
+  **Settings > General > Tab activity indicators** (on by default), which
+  tracks terminal output.
 - Agent state is live only: after a restart it comes back when the agent next
   reports. Other agents keep their notifications and show no live state yet.
 
