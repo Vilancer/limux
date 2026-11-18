@@ -1817,9 +1817,14 @@ fn ux_tour_snapshots() {
     pane::add_terminal_tab_to_pane(&limux_pane);
     let limux_second = pane::active_surface_summary(&limux_pane).unwrap();
     pane::add_terminal_tab_to_pane(&limux_pane);
+    let limux_shell = pane::active_surface_summary(&limux_pane).unwrap();
     let (ghostty_id, ghostty_pane) = add_named_workspace(&state, "ghostty");
     let ghostty_tab = pane::active_surface_summary(&ghostty_pane).unwrap();
-    let (_notes_id, _) = add_named_workspace(&state, "notes");
+    let (notes_id, notes_pane) = add_named_workspace(&state, "notes");
+    let notes_tab = pane::active_surface_summary(&notes_pane).unwrap();
+    pump_until(std::time::Duration::from_secs(5), || {
+        live_terminal(&notes_pane, &notes_tab.surface_id)
+    });
 
     let clients_group = sidebar_groups::create_group(
         &state,
@@ -1889,6 +1894,26 @@ fn ux_tour_snapshots() {
             tab_id: Some(ghostty_tab.tab_id.clone()),
         },
     );
+    // A plain shell that finished a build and was read: kept as quiet.
+    state
+        .borrow_mut()
+        .agent_activity
+        .keep(&limux_shell.tab_id, crate::agent_activity::now_ms());
+    pending_panel::note_message(
+        &mut state.borrow_mut(),
+        &limux_id,
+        Some(&limux_shell.tab_id),
+        "Finished",
+    );
+    // The notes shell exits while nobody watches: held with Restart / Close.
+    let (_, notes_handle) =
+        pane::terminal_handle_for_surface(&notes_pane, Some(&notes_tab.surface_id)).unwrap();
+    assert!(notes_handle.send_text("exit 2"));
+    assert!(notes_handle.send_key("enter"));
+    pump_until(std::time::Duration::from_secs(5), || {
+        notes_handle.health().process_exited
+    });
+    agent_activity_ui::refresh_activity(&state);
     pump_for(std::time::Duration::from_millis(1500));
     let content = window.child().unwrap();
     snapshot_widget(&content, "tour-1-overview");
@@ -1949,6 +1974,19 @@ fn ux_tour_snapshots() {
     toggle_sidebar(&state);
     pump_for(std::time::Duration::from_millis(800));
     snapshot_widget(&content, "tour-7-full-screen");
+    toggle_top_bar(&state);
+    toggle_sidebar(&state);
+
+    // The held exit, opened.
+    let notes_index = state
+        .borrow()
+        .workspaces
+        .iter()
+        .position(|w| w.id == notes_id)
+        .unwrap();
+    select_workspace_by_index(&state, notes_index);
+    pump_for(std::time::Duration::from_millis(800));
+    snapshot_widget(&content, "tour-10-held-exit");
     let _ = (limux_second, limux_pane);
     window.close();
 }
