@@ -738,7 +738,7 @@ fn is_waiting_label(state_label: &str) -> bool {
 #[derive(Clone)]
 pub(super) struct RowExtras {
     /// Shown in the sign column instead of the dot while an agent works.
-    pub spinner: gtk::Spinner,
+    pub spinner: gtk::DrawingArea,
     /// "Bash: cargo test" after the name, in a collapsed group's preview.
     pub preview_label: gtk::Label,
     /// How long the current state has lasted ("3m").
@@ -746,15 +746,8 @@ pub(super) struct RowExtras {
 }
 
 /// A small spinner for "working" (it stands still when animations are off).
-pub(super) fn working_spinner() -> gtk::Spinner {
-    let spinner = gtk::Spinner::new();
-    spinner.set_size_request(10, 10);
-    spinner.set_valign(gtk::Align::Center);
-    spinner.set_halign(gtk::Align::Center);
-    spinner.set_can_target(false);
-    spinner.add_css_class("limux-working-spinner");
-    spinner.start();
-    spinner
+pub(super) fn working_spinner() -> gtk::DrawingArea {
+    crate::working_spinner::new()
 }
 
 /// Rework a project row for agent activity: the sign (dot or spinner) gets a

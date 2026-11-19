@@ -973,11 +973,7 @@ fn tab_agent_sign_box(entry: &TabEntry, create: bool) -> Option<gtk::Box> {
     let glyph = gtk::Label::new(Some("\u{25C6}"));
     glyph.add_css_class("limux-session-waiting");
     sign.append(&glyph);
-    let spinner = gtk::Spinner::new();
-    spinner.set_size_request(10, 10);
-    spinner.set_valign(gtk::Align::Center);
-    spinner.add_css_class("limux-working-spinner");
-    sign.append(&spinner);
+    sign.append(&crate::working_spinner::new());
     parent.insert_child_after(&sign, Some(&entry.unread_dot));
     Some(sign)
 }
@@ -1022,13 +1018,12 @@ pub fn sync_tab_agent_signs(mut sign_of: impl FnMut(&str) -> Option<TabAgentSign
                 let working = sign.as_ref().is_some_and(|sign| sign.working);
                 if let Some(sign_box) = tab_agent_sign_box(entry, waiting || working) {
                     let glyph = sign_box.first_child();
-                    let spinner = sign_box.last_child().and_downcast::<gtk::Spinner>();
+                    let spinner = sign_box.last_child();
                     if let Some(glyph) = glyph {
                         glyph.set_visible(waiting);
                     }
                     if let Some(spinner) = spinner {
                         spinner.set_visible(working);
-                        spinner.set_spinning(working);
                     }
                     sign_box.set_visible(waiting || working);
                 }
