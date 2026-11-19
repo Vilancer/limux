@@ -1063,6 +1063,89 @@ fn agy_stop_suppresses_notification(payload: &Value) -> bool {
         || hook_str(payload, &["terminationReason"]) == Some("USER_CANCELED")
 }
 
+/// Subagents of a Claude Code session that still run when its turn ends. It
+/// wakes up on its own when they finish, so the turn's end is not the end
+/// of the work. Background shell commands do not count: a server never ends.
+fn claude_running_subagents(payload: &Value) -> Vec<&str> {
+    payload
+        .get("background_tasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|task| {
+            hook_str(task, &["status"]) == Some("running")
+                && hook_str(task, &["type"]).is_some_and(|kind| kind != "shell")
+        })
+        .map(|task| hook_str(task, &["description"]).unwrap_or("background agent"))
+        .collect()
+}
+
+/// The notification (title, body) a hook event posts, if any.
+fn agent_hook_notification(
+    agent: agent_hooks::AgentKind,
+    event: &str,
+    payload: &Value,
+) -> Option<(String, String)> {
+    let agent_label = agent.label();
+    match event {
+        // A background agent finishing is not the session finishing: the
+        // main agent picks its result up and reports when it is done.
+        "Notification" | "notification"
+            if hook_str(payload, &["notification_type", "notificationType"])
+                == Some("agent_completed") =>
+        {
+            None
+        }
+        // A message Claude chose to send does not ask for anything.
+        "Notification" | "notification"
+            if hook_str(payload, &["notification_type", "notificationType"])
+                == Some("push_notification") =>
+        {
+            Some((
+                agent_label.to_string(),
+                hook_str(payload, &["message", "notification"])
+                    .unwrap_or("update")
+                    .to_owned(),
+            ))
+        }
+        "Notification" | "notification" => Some((
+            format!("{agent_label} needs you"),
+            hook_str(payload, &["message", "notification"])
+                .unwrap_or("waiting for input")
+                .to_owned(),
+        )),
+        "Stop" | "stop" | "finished" => {
+            if (agent == agent_hooks::AgentKind::Agy && agy_stop_suppresses_notification(payload))
+                || !claude_running_subagents(payload).is_empty()
+            {
+                None
+            } else {
+                // What it last said tells the tasks apart.
+                let body = hook_str(payload, &["last_assistant_message"])
+                    .map(|message| one_line(&plain_text(message), 140))
+                    .filter(|line| !line.is_empty())
+                    .or_else(|| hook_str(payload, &["message", "reason"]).map(str::to_owned))
+                    .unwrap_or_else(|| "task complete".to_owned());
+                Some((format!("{agent_label} finished"), body))
+            }
+        }
+        "SessionStart" | "session-start" | "SessionEnd" | "session-end" | "UserPromptSubmit"
+        | "prompt-submit" | "PreToolUse" | "PostToolUse" | "post-tool-use" | "SubagentStop"
+        | "subagent-stop" | "Cleanup" | "cleanup" | "restore-exit" => None,
+        other => Some((
+            format!("{agent_label}: {other}"),
+            hook_str(payload, &["message", "summary"])
+                .unwrap_or("")
+                .to_owned(),
+        )),
+    }
+}
+
+/// Markdown emphasis and code marks removed, for a notification body.
+fn plain_text(text: &str) -> String {
+    text.replace("**", "").replace('`', "")
+}
+
 /// Run an agent hook: read JSON from stdin, synthesize a notification.
 ///
 /// Args:
@@ -1098,71 +1181,16 @@ async fn run_agent_hook(
     }
 
     // Build a human-friendly title + body depending on event + agent.
-    let agent_label = agent.label();
     persist_agent_hook_session(agent, args, &payload, &event)?;
-    let notification_title_body = match event.as_str() {
-        // A background agent finishing, or a message Claude sends on its
-        // own, does not ask for anything.
-        "Notification" | "notification"
-            if matches!(
-                hook_str(&payload, &["notification_type", "notificationType"]),
-                Some("agent_completed" | "push_notification")
-            ) =>
-        {
-            Some((
-                agent_label.to_string(),
-                hook_str(&payload, &["message", "notification"])
-                    .unwrap_or("update")
-                    .to_owned(),
-            ))
-        }
-        "Notification" | "notification" => Some((
-            format!("{agent_label} needs you"),
-            hook_str(&payload, &["message", "notification"])
-                .unwrap_or("waiting for input")
-                .to_owned(),
-        )),
-        "Stop" | "stop" | "finished" => {
-            if agent == agent_hooks::AgentKind::Agy && agy_stop_suppresses_notification(&payload) {
-                None
-            } else {
-                Some((
-                    format!("{agent_label} finished"),
-                    hook_str(&payload, &["message", "reason"])
-                        .unwrap_or("task complete")
-                        .to_owned(),
-                ))
-            }
-        }
-        "SessionStart" | "session-start" | "SessionEnd" | "session-end" | "UserPromptSubmit"
-        | "prompt-submit" | "PreToolUse" | "PostToolUse" | "post-tool-use" | "SubagentStop"
-        | "subagent-stop" | "Cleanup" | "cleanup" | "restore-exit" => None,
-        other => Some((
-            format!("{agent_label}: {other}"),
-            hook_str(&payload, &["message", "summary"])
-                .unwrap_or("")
-                .to_owned(),
-        )),
-    };
+    let notification_title_body = agent_hook_notification(agent, &event, &payload);
 
     if let Some((title, body)) = notification_title_body {
-        let subtitle = hook_str(
-            &payload,
-            &["session_id", "conversationId", "sessionId", "sessionID"],
-        )
-        .map(|s| {
-            // Show only a short prefix of the session id to keep sidebar tidy.
-            s.chars().take(8).collect::<String>()
-        })
-        .unwrap_or_default();
-
+        // No session id in the text: it says nothing to the reader and
+        // pushes the message out of the sidebar row.
         let (workspace, surface) = notification_scope(args, env_opt);
 
         let mut params = Map::new();
         params.insert("title".to_string(), Value::String(title));
-        if !subtitle.is_empty() {
-            params.insert("subtitle".to_string(), Value::String(subtitle));
-        }
         if !body.is_empty() {
             params.insert("body".to_string(), Value::String(body));
         }
@@ -1198,6 +1226,7 @@ fn agent_activity_state(
         return None;
     }
     match event {
+        "Stop" | "stop" if !claude_running_subagents(payload).is_empty() => Some("working"),
         "SessionStart" | "session-start" | "Stop" | "stop" => Some("idle"),
         "UserPromptSubmit" | "prompt-submit" | "PreToolUse" | "PostToolUse" | "post-tool-use" => {
             Some("working")
@@ -1314,6 +1343,11 @@ fn agent_activity_detail(event: &str, payload: &Value) -> Option<String> {
             }
         }
         "Notification" | "notification" => hook_str(payload, &["message"])?.to_owned(),
+        "Stop" | "stop" => match claude_running_subagents(payload).as_slice() {
+            [] => return None,
+            [one] => format!("Waiting on: {one}"),
+            many => format!("Waiting on {} background agents", many.len()),
+        },
         _ => return None,
     };
     Some(one_line(&text, 80))
@@ -5289,6 +5323,62 @@ mod cli_arg_tests {
         );
         assert!(params.get("session_id").is_none());
         assert_eq!(params["detail"], "Bash: ls");
+    }
+
+    #[test]
+    fn claude_notifies_once_the_main_agent_is_done_with_what_it_said() {
+        use agent_hooks::AgentKind::Claude;
+        let running = json!({
+            "last_assistant_message": "started",
+            "background_tasks": [
+                {"id": "b1", "type": "shell", "status": "running", "description": "dev server"},
+                {"id": "a1", "type": "subagent", "status": "running", "description": "Reply with pong"},
+            ],
+        });
+        // Subagents still run: no notification, and it keeps working.
+        assert_eq!(agent_hook_notification(Claude, "stop", &running), None);
+        assert_eq!(
+            agent_activity_state(Claude, "stop", &running),
+            Some("working")
+        );
+        assert_eq!(
+            agent_activity_detail("stop", &running).as_deref(),
+            Some("Waiting on: Reply with pong")
+        );
+        // Only a background shell command left (it may never end): done.
+        let done = json!({
+            "last_assistant_message": "\nThe **sidebar** fix is in `window.rs`.\nMore detail.",
+            "background_tasks": [
+                {"id": "b1", "type": "shell", "status": "running", "description": "dev server"},
+            ],
+        });
+        assert_eq!(
+            agent_hook_notification(Claude, "stop", &done),
+            Some((
+                "Claude finished".to_string(),
+                "The sidebar fix is in window.rs.".to_string()
+            ))
+        );
+        assert_eq!(agent_activity_state(Claude, "stop", &done), Some("idle"));
+        assert_eq!(
+            agent_hook_notification(Claude, "stop", &json!({})),
+            Some(("Claude finished".to_string(), "task complete".to_string()))
+        );
+        // A background agent finishing does not notify; one asking does.
+        assert_eq!(
+            agent_hook_notification(
+                Claude,
+                "notification",
+                &json!({"notification_type": "agent_completed", "message": "ca842437 finished"})
+            ),
+            None
+        );
+        assert!(agent_hook_notification(
+            Claude,
+            "notification",
+            &json!({"notification_type": "agent_needs_input", "message": "builder needs your input"})
+        )
+        .is_some());
     }
 
     #[test]

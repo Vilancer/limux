@@ -237,6 +237,24 @@ impl ActivityStore {
         }
     }
 
+    /// The user answered a permission dialog at `at_ms` (Enter or a digit
+    /// went into the terminal): the agent works again. No hook says so until
+    /// the approved tool ends, which can be long. After a deny the agent goes
+    /// quiet and `settle_quiet` makes it idle. Returns whether it changed.
+    pub fn answered(&mut self, tab_id: &str, at_ms: u64) -> bool {
+        let Some(activity) = self.surfaces.get_mut(tab_id) else {
+            return false;
+        };
+        if activity.phase != AgentPhase::NeedsApproval || at_ms <= activity.at_ms {
+            return false;
+        }
+        activity.phase = AgentPhase::Working;
+        activity.at_ms = at_ms;
+        activity.since_ms = at_ms;
+        activity.detail = None;
+        true
+    }
+
     /// Keep a terminal listed (as idle) that has something for the user but
     /// no state yet, such as an unread notification. Returns whether it was
     /// added.
@@ -814,6 +832,33 @@ mod tests {
         store.apply(event("u", Some(AgentPhase::Working), None, 1_000));
         assert!(!store.keep("u", 2_000), "an agent's state is left alone");
         assert_eq!(store.phase("u"), Some(AgentPhase::Working));
+    }
+
+    #[test]
+    fn answering_a_permission_dialog_resumes_working() {
+        let mut store = ActivityStore::default();
+        store.apply(event(
+            "t",
+            Some(AgentPhase::NeedsApproval),
+            Some("s"),
+            5_000,
+        ));
+        assert!(!store.answered("t", 4_000), "a key from before the dialog");
+        assert!(store.answered("t", 6_000));
+        assert_eq!(store.phase("t"), Some(AgentPhase::Working));
+        assert!(!store.answered("t", 7_000), "only a waiting approval");
+        // A question stays until its tool ends (a hook says so at once).
+        store.apply(event("t", Some(AgentPhase::NeedsInput), Some("s"), 8_000));
+        assert!(!store.answered("t", 9_000));
+        // The tool's end still applies after the answer.
+        store.apply(event(
+            "t",
+            Some(AgentPhase::NeedsApproval),
+            Some("s"),
+            10_000,
+        ));
+        assert!(store.answered("t", 11_000));
+        assert!(store.apply(event("t", Some(AgentPhase::Idle), Some("s"), 12_000)));
     }
 
     #[test]

@@ -356,7 +356,15 @@ fn track_terminals(state: &State) -> bool {
                     .unwrap_or(u64::MAX);
                 now_ms.saturating_sub(ago)
             });
+            let answered = terminal.answered_at.map(|at| {
+                let ago = u64::try_from(now.saturating_duration_since(at).as_millis())
+                    .unwrap_or(u64::MAX);
+                now_ms.saturating_sub(ago)
+            });
             let mut s = state.borrow_mut();
+            if let Some(answered) = answered {
+                changed |= s.agent_activity.answered(&terminal.tab_id, answered);
+            }
             match s
                 .agent_activity
                 .track_terminal(&terminal.tab_id, now_ms, since)

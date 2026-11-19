@@ -1925,7 +1925,7 @@ fn make_terminal_callbacks(
             let callbacks = internals.callbacks.clone();
             let tab_id = tab_id.to_string();
             move |at, input| {
-                let typed = input == crate::terminal::TerminalInput::Typed;
+                let typed = input.is_typed();
                 let Some(tab_state) = tab_state.upgrade() else {
                     return;
                 };
@@ -3399,6 +3399,8 @@ pub struct TerminalOutputState {
     pub tab_id: String,
     /// When it began printing on its own, while it still does.
     pub working_since: Option<std::time::Instant>,
+    /// When a key that answers a dialog last went in (Enter or a digit).
+    pub answered_at: Option<std::time::Instant>,
     pub unread: bool,
 }
 
@@ -3422,6 +3424,7 @@ pub fn terminal_output_states(
                 pane_id: internals.pane_id,
                 tab_id: entry.id.clone(),
                 working_since: entry.activity.working_since(now),
+                answered_at: entry.activity.answered_at(),
                 unread: entry.unread,
             });
         }

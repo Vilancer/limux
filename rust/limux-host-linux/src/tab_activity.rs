@@ -24,6 +24,8 @@ struct ActivityState {
     /// While the shell starts (its greeting, a slow config, a prompt that
     /// fills in its git status), until this or until input is sent to it.
     starting_until: Cell<Option<Instant>>,
+    /// When a key that answers a dialog last went in.
+    answered_at: Cell<Option<Instant>>,
     /// The current run of output the terminal made on its own: (first, last).
     own_output: Cell<Option<(Instant, Instant)>>,
     mapped: Cell<bool>,
@@ -55,6 +57,7 @@ impl TabActivity {
             // starts; a restored background tab starts when first shown.
             starting_until: Cell::new(Some(Instant::now() + STARTUP_WINDOW)),
             own_output: Cell::new(None),
+            answered_at: Cell::new(None),
             mapped: Cell::new(false),
             unread: Cell::new(false),
             enabled: Cell::new(config.show_tab_activity),
@@ -117,6 +120,14 @@ impl TabActivity {
         if input == TerminalInput::Start {
             self.0.own_output.set(None);
         }
+        if input.is_answer() {
+            self.0.answered_at.set(Some(at));
+        }
+    }
+
+    /// When a key that answers a dialog (Enter or a digit) last went in.
+    pub(crate) fn answered_at(&self) -> Option<Instant> {
+        self.0.answered_at.get()
     }
 
     pub(crate) fn record_output(&self, at: Instant) {
@@ -235,8 +246,8 @@ fn starting_until(current: Option<Instant>, at: Instant, input: TerminalInput) -
     match input {
         TerminalInput::Start => Some(at + STARTUP_WINDOW),
         // Someone is using the shell: what it prints now is theirs.
-        TerminalInput::Typed | TerminalInput::Sent => None,
-        TerminalInput::Redraw => current,
+        input if input.is_command() => None,
+        _ => current,
     }
 }
 

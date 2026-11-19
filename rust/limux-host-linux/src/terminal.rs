@@ -456,10 +456,17 @@ impl TerminalHandle {
         let Ok(binding) = NormalizedShortcut::parse(key) else {
             return false;
         };
-        note_input(&self.callbacks, TerminalInput::Sent);
         let Some((keyval, modifier)) = gtk::accelerator_parse(binding.to_config_accel()) else {
             return false;
         };
+        note_input(
+            &self.callbacks,
+            if is_answer_key(keyval) {
+                TerminalInput::SentAnswer
+            } else {
+                TerminalInput::Sent
+            },
+        );
 
         // A key needs BOTH halves, and supplying only one drops it silently.
         //
@@ -1483,6 +1490,38 @@ pub enum TerminalInput {
     Sent,
     /// A resize or a focus change: programs redraw for it.
     Redraw,
+    /// `Typed`, with a key that answers a yes/no dialog (Enter or a digit).
+    TypedAnswer,
+    /// `Sent`, with such a key.
+    SentAnswer,
+}
+
+impl TerminalInput {
+    /// The user typed or pasted.
+    pub fn is_typed(self) -> bool {
+        matches!(self, Self::Typed | Self::TypedAnswer)
+    }
+
+    /// Someone gave the terminal something to do, typed or sent.
+    pub fn is_command(self) -> bool {
+        matches!(
+            self,
+            Self::Typed | Self::TypedAnswer | Self::Sent | Self::SentAnswer
+        )
+    }
+
+    /// A key that answers a yes/no dialog.
+    pub fn is_answer(self) -> bool {
+        matches!(self, Self::TypedAnswer | Self::SentAnswer)
+    }
+}
+
+/// Keys that answer an agent's permission dialog: Enter takes the selected
+/// choice, a digit picks one.
+fn is_answer_key(keyval: gtk::gdk::Key) -> bool {
+    use gtk::gdk::Key;
+    matches!(keyval, Key::Return | Key::KP_Enter | Key::ISO_Enter)
+        || keyval.to_unicode().is_some_and(|c| c.is_ascii_digit())
 }
 
 /// Tell the owner that input reached the terminal (see
@@ -2267,6 +2306,8 @@ pub fn create_terminal(
                     &callbacks_for_keys,
                     if is_modifier_key(keyval) {
                         TerminalInput::Redraw
+                    } else if is_answer_key(keyval) {
+                        TerminalInput::TypedAnswer
                     } else {
                         TerminalInput::Typed
                     },
