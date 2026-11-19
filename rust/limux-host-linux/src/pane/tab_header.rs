@@ -83,7 +83,6 @@ pub(super) fn build_tab_button_from_label(
         let content_stack = internals.content_stack.clone();
         let tab_state = internals.tab_state.clone();
         let callbacks = internals.callbacks.clone();
-        let pane_widget = internals.pane_outer.downgrade();
         let tab_button = tab_btn.downgrade();
         let label = label.clone();
         click.connect_pressed(move |gesture, n_press, _, _| {
@@ -95,14 +94,6 @@ pub(super) fn build_tab_button_from_label(
                 return;
             }
             activate_tab(&tab_strip, &content_stack, &tab_state, &tab_id);
-            if let Some(pane_widget) = pane_widget.upgrade() {
-                clear_tab_unread_if_visible(
-                    &tab_state,
-                    &tab_id,
-                    pane_widget.upcast_ref(),
-                    &callbacks,
-                );
-            }
             (callbacks.on_state_changed)();
             if n_press == 2 {
                 gesture.set_state(gtk::EventSequenceState::Claimed);

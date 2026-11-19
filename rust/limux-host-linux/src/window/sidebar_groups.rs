@@ -3,8 +3,11 @@
 //! list. The order and its rules live in `workspace_group`.
 
 use super::*;
+use crate::agent_activity::{ActivityCounts, GLYPH_UNREAD, GLYPH_WAITING};
 use crate::control_bridge::GroupRequest;
-use crate::workspace_group::{GroupError, SidebarRow, WorkspaceGroup};
+use crate::workspace_group::{
+    ActivePreviews, Activity, GroupError, SidebarRow, WorkspaceGroup, ACTIVE_PREVIEW_CAP,
+};
 
 /// Drag payload prefix for a group header. Tab payloads are `pane:tab` with
 /// a numeric pane, so this never parses as one.
@@ -20,9 +23,21 @@ pub(super) struct GroupHeader {
     pill: gtk::Box,
     name_label: gtk::Label,
     count_label: gtk::Label,
+    /// The number inside the working button, next to its spinner.
+    working_count: gtk::Label,
+    /// "↻ N": working terminals in the group, shown even when collapsed; a
+    /// click goes to the next one.
+    working_label: gtk::Button,
+    /// "◆ N": waiting terminals; a click goes to the next one.
+    waiting_button: gtk::Button,
+    /// "● N": unread projects, when none waits; a click goes to the next one.
+    unread_button: gtk::Button,
+    /// Below a collapsed group: "N more", the active projects past the cap.
+    more_row: gtk::ListBoxRow,
+    more_button: gtk::Button,
 }
 
-fn group_color_class(color: WorkspaceColor) -> String {
+pub(super) fn group_color_class(color: WorkspaceColor) -> String {
     format!("limux-ws-group-{}", color.as_str())
 }
 
@@ -80,7 +95,8 @@ pub(super) fn workspace_group_css() -> String {
         css.push_str(&format!(
             ".limux-ws-group-pill.{class} {{\n    background: {hex};\n}}\n\
              .limux-sidebar-list row.{MEMBER_CSS_CLASS}.{class} {{\n    box-shadow: inset 3px 0 0 0 {hex};\n}}\n\
-             .{DOT_CSS_PREFIX}{name} {{\n    color: {hex};\n}}\n",
+             .{DOT_CSS_PREFIX}{name} {{\n    color: {hex};\n}}\n\
+             .limux-pending-row.{class} {{\n    box-shadow: inset 3px 0 0 0 {hex};\n}}\n",
             name = color.as_str(),
         ));
     }
@@ -103,11 +119,81 @@ fn build_group_header(state: &State, group_id: &str) -> GroupHeader {
     let count_label = gtk::Label::new(None);
     count_label.add_css_class("limux-ws-group-count");
 
+    let working_label = gtk::Button::new();
+    let working_count = gtk::Label::new(None);
+    let working_content = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    working_content.append(&agent_activity_ui::working_spinner());
+    working_content.append(&working_count);
+    working_label.set_child(Some(&working_content));
+    working_label.add_css_class("flat");
+    working_label.add_css_class("limux-ws-group-working");
+    working_label.set_focus_on_click(false);
+    working_label.set_valign(gtk::Align::Center);
+    working_label.set_visible(false);
+    {
+        let state = state.clone();
+        let group_id = group_id.to_string();
+        working_label.connect_clicked(move |_| cycle_working_terminal(&state, &group_id));
+    }
+
+    let waiting_button = gtk::Button::new();
+    waiting_button.add_css_class("flat");
+    waiting_button.add_css_class("limux-ws-group-waiting");
+    waiting_button.add_css_class("limux-notify-dot");
+    waiting_button.add_css_class("limux-ws-group-needs-you");
+    waiting_button.set_focus_on_click(false);
+    waiting_button.set_valign(gtk::Align::Center);
+    waiting_button.set_visible(false);
+    {
+        let state = state.clone();
+        let group_id = group_id.to_string();
+        waiting_button.connect_clicked(move |_| {
+            cycle_attention_terminal(&state, true, Some(&group_id));
+        });
+    }
+
     let header_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     header_box.add_css_class("limux-ws-group-header");
     header_box.append(&chevron);
     header_box.append(&pill);
     header_box.append(&count_label);
+    let unread_button = gtk::Button::new();
+    unread_button.add_css_class("flat");
+    unread_button.add_css_class("limux-ws-group-waiting");
+    unread_button.add_css_class("limux-notify-dot");
+    unread_button.set_focus_on_click(false);
+    unread_button.set_valign(gtk::Align::Center);
+    unread_button.set_visible(false);
+    {
+        let state = state.clone();
+        let group_id = group_id.to_string();
+        unread_button.connect_clicked(move |_| {
+            cycle_unread_in_group(&state, &group_id);
+        });
+    }
+
+    // Counts sit on the right, loudest first: waiting, unread, working.
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    header_box.append(&spacer);
+    header_box.append(&waiting_button);
+    header_box.append(&unread_button);
+    header_box.append(&working_label);
+
+    let more_button = gtk::Button::new();
+    more_button.add_css_class("flat");
+    more_button.add_css_class("limux-ws-group-more");
+    more_button.set_halign(gtk::Align::Start);
+    {
+        let state = state.clone();
+        let group_id = group_id.to_string();
+        more_button.connect_clicked(move |_| show_next_hidden_active(&state, &group_id));
+    }
+    let more_row = gtk::ListBoxRow::new();
+    more_row.set_selectable(false);
+    more_row.set_activatable(false);
+    more_row.set_child(Some(&more_button));
+    more_row.set_visible(false);
 
     let row = gtk::ListBoxRow::new();
     row.add_css_class("limux-ws-group-row");
@@ -123,7 +209,263 @@ fn build_group_header(state: &State, group_id: &str) -> GroupHeader {
         pill,
         name_label,
         count_label,
+        working_label,
+        working_count,
+        waiting_button,
+        unread_button,
+        more_row,
+        more_button,
     }
+}
+
+/// Show a group's working and waiting counts on its header, and how many
+/// waiting projects the collapsed group could not list.
+fn update_group_activity(
+    header: &GroupHeader,
+    group: &WorkspaceGroup,
+    counts: ActivityCounts,
+    unread_projects: usize,
+    hidden_active: usize,
+    hidden_working_only: bool,
+) {
+    header.working_count.set_label(&counts.working.to_string());
+    header.working_label.set_visible(counts.working > 0);
+    let working_tip = format!(
+        "{}: {} agent{} working. Go to the next one",
+        group.name,
+        counts.working,
+        if counts.working == 1 { "" } else { "s" }
+    );
+    header.working_label.set_tooltip_text(Some(&working_tip));
+    header
+        .working_label
+        .update_property(&[gtk::accessible::Property::Label(&working_tip)]);
+    header
+        .waiting_button
+        .set_label(&format!("{GLYPH_WAITING} {}", counts.waiting));
+    header.waiting_button.set_visible(counts.waiting > 0);
+    let waiting_tip = format!(
+        "{}: {} need{} you. Go to the next one",
+        group.name,
+        counts.waiting,
+        if counts.waiting == 1 { "s" } else { "" }
+    );
+    header.waiting_button.set_tooltip_text(Some(&waiting_tip));
+    header
+        .waiting_button
+        .update_property(&[gtk::accessible::Property::Label(&waiting_tip)]);
+
+    header
+        .unread_button
+        .set_label(&format!("{GLYPH_UNREAD} {unread_projects}"));
+    header.unread_button.set_visible(unread_projects > 0);
+    let unread_tip = format!(
+        "{}: {unread_projects} unread project{}. Go to the next one",
+        group.name,
+        if unread_projects == 1 { "" } else { "s" }
+    );
+    header.unread_button.set_tooltip_text(Some(&unread_tip));
+    header
+        .unread_button
+        .update_property(&[gtk::accessible::Property::Label(&unread_tip)]);
+
+    header.more_button.set_label(&format!(
+        "+{hidden_active} {} \u{203A}",
+        if hidden_working_only {
+            "working"
+        } else {
+            "more"
+        }
+    ));
+    let more_tip = format!(
+        "{hidden_active} more active project{} in {}. Go to the next one",
+        if hidden_active == 1 { "" } else { "s" },
+        group.name
+    );
+    header.more_button.set_tooltip_text(Some(&more_tip));
+    header
+        .more_button
+        .update_property(&[gtk::accessible::Property::Label(&more_tip)]);
+
+    let mut summary = header
+        .row
+        .tooltip_text()
+        .map(|text| text.to_string())
+        .unwrap_or_default();
+    if let Some(activity) = crate::agent_activity::counts_summary(counts) {
+        summary = format!("{summary}; {activity}");
+    }
+    header
+        .row
+        .update_property(&[gtk::accessible::Property::Label(&summary)]);
+}
+
+/// Activity counts per workspace, the waiting projects collapsed groups keep
+/// visible, and the counts per group.
+struct GroupActivity {
+    previews: ActivePreviews,
+    by_group: HashMap<String, ActivityCounts>,
+    /// Group id → members with unread marks.
+    unread_by_group: HashMap<String, usize>,
+    /// Group id → whether every member the previews left out is only working.
+    more_working_only: HashMap<String, bool>,
+}
+
+fn group_activity(s: &AppState) -> GroupActivity {
+    let by_workspace: HashMap<String, ActivityCounts> = s
+        .workspaces
+        .iter()
+        .map(|workspace| {
+            (
+                workspace.id.clone(),
+                agent_activity_ui::workspace_activity_counts(s, &workspace.id),
+            )
+        })
+        .collect();
+    let active = s.active_workspace().map(|workspace| workspace.id.as_str());
+    let unread: HashSet<&str> = s
+        .workspaces
+        .iter()
+        .filter(|workspace| {
+            agent_activity_ui::has_finished_unread(
+                s,
+                &workspace.id,
+                workspace.unread || workspace.manual_unread,
+            )
+        })
+        .map(|workspace| workspace.id.as_str())
+        .collect();
+    let previews = s.sidebar.active_previews(
+        active,
+        |id| {
+            let counts = by_workspace.get(id)?;
+            if counts.waiting > 0 {
+                Some(Activity::Waiting)
+            } else if unread.contains(id) {
+                Some(Activity::Unread)
+            } else if counts.working > 0 {
+                Some(Activity::Working)
+            } else if counts.quiet > 0 {
+                Some(Activity::Quiet)
+            } else {
+                None
+            }
+        },
+        ACTIVE_PREVIEW_CAP,
+    );
+    let by_group = s
+        .sidebar
+        .groups()
+        .map(|group| {
+            let mut counts = ActivityCounts::default();
+            for member in group.members() {
+                if let Some(member) = by_workspace.get(member) {
+                    counts.add(*member);
+                }
+            }
+            (group.id.clone(), counts)
+        })
+        .collect();
+    let unread_by_group = s
+        .sidebar
+        .groups()
+        .map(|group| {
+            let count = group
+                .members()
+                .iter()
+                .filter(|member| unread.contains(member.as_str()))
+                .count();
+            (group.id.clone(), count)
+        })
+        .collect();
+    // "+2 working ›" when everything left out is only working.
+    let more_working_only = previews
+        .more
+        .iter()
+        .map(|(group, hidden)| {
+            let working_only = hidden.iter().all(|id| {
+                !unread.contains(id.as_str())
+                    && by_workspace
+                        .get(id)
+                        .is_some_and(|counts| counts.waiting == 0 && counts.working > 0)
+            });
+            (group.clone(), working_only)
+        })
+        .collect();
+    GroupActivity {
+        previews,
+        by_group,
+        unread_by_group,
+        more_working_only,
+    }
+}
+
+/// The "N more" row: go to the first active project the collapsed group left
+/// out (waiting ones first). Once it is selected it shows as the selected row, so the
+/// next click reaches the next one.
+fn show_next_hidden_active(state: &State, group_id: &str) {
+    let first_hidden = {
+        let s = state.borrow();
+        group_activity(&s)
+            .previews
+            .more
+            .get(group_id)
+            .and_then(|hidden| hidden.first().cloned())
+    };
+    let Some(workspace_id) = first_hidden else {
+        return;
+    };
+    // The terminal that put it there, ranked as the previews are: waiting,
+    // unread, working, then quiet.
+    let target_tab = {
+        let s = state.borrow();
+        let panes = s
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .map(|workspace| workspace.split_container.panes())
+            .unwrap_or_default();
+        panes
+            .iter()
+            .filter_map(pane::session_tabs_in_pane)
+            .flat_map(|pane_tabs| {
+                let pane_id = pane_tabs.pane_id;
+                pane_tabs.tabs.into_iter().map(move |tab| (pane_id, tab))
+            })
+            .filter_map(|(pane_id, tab)| {
+                let phase = s.agent_activity.phase(&tab.tab_id);
+                let rank = match phase {
+                    Some(phase) if phase.is_waiting() => 0,
+                    _ if tab.unread => 1,
+                    Some(crate::agent_activity::AgentPhase::Working) => 2,
+                    Some(_) => 3,
+                    None => return None,
+                };
+                Some((rank, pane_id, tab.tab_id))
+            })
+            .min_by_key(|(rank, _, _)| *rank)
+    };
+    let target = DesktopNotificationTarget {
+        workspace_id,
+        pane_id: target_tab.as_ref().map(|(_, pane_id, _)| *pane_id),
+        tab_id: target_tab.map(|(_, _, tab_id)| tab_id),
+    };
+    activate_desktop_notification_target(state, &target, None);
+}
+
+/// Click a group header's `● N` count, as the user would.
+#[cfg(test)]
+pub(super) fn click_unread_count(state: &State, group_id: &str) {
+    let button = state.borrow().group_headers[group_id].unread_button.clone();
+    assert!(button.is_visible(), "the unread count is shown");
+    button.emit_clicked();
+}
+
+/// Click a collapsed group's `+N more` row.
+#[cfg(test)]
+pub(super) fn click_more(state: &State, group_id: &str) {
+    let button = state.borrow().group_headers[group_id].more_button.clone();
+    button.emit_clicked();
 }
 
 fn update_group_header(header: &GroupHeader, group: &WorkspaceGroup) {
@@ -133,15 +475,17 @@ fn update_group_header(header: &GroupHeader, group: &WorkspaceGroup) {
         "\u{25BE}"
     });
     header.name_label.set_label(&group.name);
+    // The counts beside it must not squeeze a short name into "…".
+    let name_chars = i32::try_from(group.name.chars().count()).unwrap_or(i32::MAX);
+    header.name_label.set_width_chars(name_chars.min(8));
     for color in WorkspaceColor::ALL {
         header.pill.remove_css_class(&group_color_class(color));
     }
     header.pill.add_css_class(&group_color_class(group.color));
     let count = group.members().len();
     header.count_label.set_label(&count.to_string());
-    header
-        .count_label
-        .set_visible(group.collapsed || count == 0);
+    // The project count is in the tooltip; only an empty group says "0".
+    header.count_label.set_visible(count == 0);
     let state = if group.collapsed {
         "collapsed"
     } else {
@@ -195,6 +539,7 @@ pub(super) fn sync_sidebar(state: &State) {
         }
         sync_indicator_active_state(s);
 
+        let activity = group_activity(s);
         let sidebar = &s.sidebar;
         s.group_headers.retain(|id, _| sidebar.group(id).is_some());
         for group in sidebar.groups() {
@@ -203,12 +548,47 @@ pub(super) fn sync_sidebar(state: &State) {
                 .entry(group.id.clone())
                 .or_insert_with(|| build_group_header(state, &group.id));
             update_group_header(header, group);
+            update_group_activity(
+                header,
+                group,
+                activity
+                    .by_group
+                    .get(&group.id)
+                    .copied()
+                    .unwrap_or_default(),
+                activity
+                    .unread_by_group
+                    .get(&group.id)
+                    .copied()
+                    .unwrap_or_default(),
+                activity.previews.more.get(&group.id).map_or(0, Vec::len),
+                activity
+                    .more_working_only
+                    .get(&group.id)
+                    .copied()
+                    .unwrap_or(false),
+            );
         }
 
         let mut rows = Vec::new();
+        // A group's "N more" row goes after its last member.
+        let mut pending_more: Option<(gtk::ListBoxRow, bool)> = None;
         for row in sidebar.rows() {
+            if matches!(
+                row,
+                SidebarRow::GroupHeader(_) | SidebarRow::Workspace { group: None, .. }
+            ) {
+                rows.extend(pending_more.take());
+            }
             let widget = match row {
-                SidebarRow::GroupHeader(group) => s.group_headers[&group.id].row.clone(),
+                SidebarRow::GroupHeader(group) => {
+                    let header = &s.group_headers[&group.id];
+                    pending_more = Some((
+                        header.more_row.clone(),
+                        group.collapsed && activity.previews.more.contains_key(&group.id),
+                    ));
+                    header.row.clone()
+                }
                 SidebarRow::Workspace { id, group } => {
                     let Some(workspace) = s.workspaces.iter().find(|w| w.id == id) else {
                         continue;
@@ -218,8 +598,12 @@ pub(super) fn sync_sidebar(state: &State) {
                     workspace.sidebar_row.clone()
                 }
             };
-            rows.push((widget, row.visible(active_id.as_deref())));
+            rows.push((
+                widget,
+                row.visible(active_id.as_deref(), &activity.previews),
+            ));
         }
+        rows.extend(pending_more.take());
         let indicators: Vec<gtk::Button> = s
             .workspaces
             .iter()
@@ -259,6 +643,9 @@ pub(super) fn sync_sidebar(state: &State) {
     if let Some(row) = row_to_select {
         sidebar_list.select_row(Some(&row));
     }
+    // Collapsing or expanding a group changes which members are one-line
+    // previews.
+    sync_row_visibility(state);
 }
 
 /// Re-add `children` in order, unless the container already holds exactly them.
@@ -290,25 +677,108 @@ fn replace_children<W: IsA<gtk::Widget>>(
     }
 }
 
-/// Show or hide member rows of collapsed groups for the active workspace.
+/// Show or hide member rows of collapsed groups for the active workspace and
+/// the waiting ones, and refresh the groups' activity counts.
 pub(super) fn sync_row_visibility(state: &State) {
+    let mut previews_now = HashSet::new();
     let rows: Vec<(gtk::ListBoxRow, bool)> = {
         let s = state.borrow();
+        let activity = group_activity(&s);
+        previews_now.clone_from(&activity.previews.shown);
         let active = s.active_workspace().map(|workspace| workspace.id.as_str());
-        s.sidebar
-            .rows()
-            .into_iter()
-            .filter_map(|row| match row {
-                SidebarRow::Workspace { id, .. } => s
-                    .workspaces
-                    .iter()
-                    .find(|w| w.id == id)
-                    .map(|workspace| (workspace.sidebar_row.clone(), row.visible(active))),
-                SidebarRow::GroupHeader(_) => None,
-            })
-            .collect()
+        let mut rows = Vec::new();
+        for row in s.sidebar.rows() {
+            match row {
+                SidebarRow::Workspace { id, .. } => {
+                    if let Some(workspace) = s.workspaces.iter().find(|w| w.id == id) {
+                        rows.push((
+                            workspace.sidebar_row.clone(),
+                            row.visible(active, &activity.previews),
+                        ));
+                    }
+                }
+                SidebarRow::GroupHeader(group) => {
+                    if let Some(header) = s.group_headers.get(&group.id) {
+                        let hidden = activity.previews.more.get(&group.id).map_or(0, Vec::len);
+                        update_group_activity(
+                            header,
+                            group,
+                            activity
+                                .by_group
+                                .get(&group.id)
+                                .copied()
+                                .unwrap_or_default(),
+                            activity
+                                .unread_by_group
+                                .get(&group.id)
+                                .copied()
+                                .unwrap_or_default(),
+                            hidden,
+                            activity
+                                .more_working_only
+                                .get(&group.id)
+                                .copied()
+                                .unwrap_or(false),
+                        );
+                        rows.push((header.more_row.clone(), group.collapsed && hidden > 0));
+                    }
+                }
+            }
+        }
+        rows
     };
     set_rows_visible(&rows);
+    // Members shown under a collapsed group become one-line previews.
+    let changed: Vec<String> = {
+        let mut s = state.borrow_mut();
+        let changed = s
+            .preview_rows
+            .symmetric_difference(&previews_now)
+            .cloned()
+            .collect();
+        s.preview_rows = previews_now;
+        changed
+    };
+    for id in changed {
+        agent_activity_ui::refresh_session_rows(state, &id, true);
+    }
+    pending_panel::sync(state);
+}
+
+/// Refresh the groups' working, waiting and unread counts on their headers,
+/// and the pending counter.
+pub(super) fn sync_group_headers(state: &State) {
+    paint_group_headers(state);
+    pending_panel::sync(state);
+}
+
+fn paint_group_headers(state: &State) {
+    let s = state.borrow();
+    let activity = group_activity(&s);
+    for group in s.sidebar.groups() {
+        if let Some(header) = s.group_headers.get(&group.id) {
+            update_group_activity(
+                header,
+                group,
+                activity
+                    .by_group
+                    .get(&group.id)
+                    .copied()
+                    .unwrap_or_default(),
+                activity
+                    .unread_by_group
+                    .get(&group.id)
+                    .copied()
+                    .unwrap_or_default(),
+                activity.previews.more.get(&group.id).map_or(0, Vec::len),
+                activity
+                    .more_working_only
+                    .get(&group.id)
+                    .copied()
+                    .unwrap_or(false),
+            );
+        }
+    }
 }
 
 /// Call without holding the state: hiding the row that holds the focus runs

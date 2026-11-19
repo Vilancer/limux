@@ -682,8 +682,8 @@ fn passive_rename_focus_restore_preserves_manual_tab_unread() {
     );
     assert!(pane::activate_tab_in_pane(&pane, &tab_id));
     assert!(
-        !pane::workspace_has_unread_tabs(&ws_id),
-        "explicit tab activation still acknowledges its marker"
+        pane::workspace_has_unread_tabs(&ws_id),
+        "showing the tab keeps its marker until the user types"
     );
     peer.close();
     window.close();
@@ -786,7 +786,6 @@ fn tab_unread_changes_preserve_independent_workspace_notifications() {
     sync_workspace_unread(&state, &ws_id);
     assert!(pane::workspace_has_unread_tabs(&ws_id));
     assert!(notify_dot.get_visible());
-    assert!(!pane::clear_active_tab_unread_in_root_if_not_manual(&root));
     assert!(pane::workspace_has_unread_tabs(&ws_id));
     let menu = open_context_menu(row.upcast_ref());
     menu_item(&menu, "Mark as Read").emit_clicked();
@@ -1156,9 +1155,1065 @@ fn next_unread_terminal_reaches_a_hidden_tab() {
     );
     assert_focus_within("the unread tab", &state, &pane);
     assert!(
-        !pane::workspace_has_unread_tabs(&ws_id),
-        "viewing it reads it"
+        pane::workspace_has_unread_tabs(&ws_id),
+        "viewing it keeps the mark until the user types"
     );
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+fn pending_test_window(app_id: &str) -> (State, tempfile::TempDir) {
+    let temp = tempfile::tempdir().unwrap();
+    for key in ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"] {
+        let path = temp.path().join(key);
+        std::fs::create_dir_all(&path).unwrap();
+        std::env::set_var(key, path);
+    }
+    let ghostty_config = temp.path().join("XDG_CONFIG_HOME/ghostty");
+    std::fs::create_dir_all(&ghostty_config).unwrap();
+    std::fs::write(
+        ghostty_config.join("config"),
+        "command = /bin/sh\nshell-integration = none\n",
+    )
+    .unwrap();
+    let socket = temp.path().join("limux.sock");
+    std::env::set_var("LIMUX_SOCKET", &socket);
+    std::env::set_var("LIMUX_SOCKET_PATH", &socket);
+
+    crate::prepare_ghostty_runtime();
+    adw::init().unwrap();
+    crate::terminal::init_ghostty();
+    let app = adw::Application::builder().application_id(app_id).build();
+    app.register(None::<&gio::Cancellable>).unwrap();
+    build_window(&app);
+    let state = CONTROL_STATE.with(|slot| slot.borrow().as_ref().unwrap().clone());
+    (state, temp)
+}
+
+fn pending_counter(state: &State) -> gtk::Button {
+    state.borrow().top_bar_pending_btn.clone().unwrap()
+}
+
+// A finished terminal in a background tab shows in the counter and the pending
+// panel; picking it focuses that exact tab, and viewing it reads it.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn pending_panel_lists_a_finished_terminal_and_jumps_to_it() {
+    let (state, _temp) = pending_test_window("dev.limux.PendingPanelTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    pane::add_terminal_tab_to_pane(&pane);
+    let finished = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    activate_workspace_shortcut(&state, 0);
+    pump_for(std::time::Duration::from_millis(1500));
+    assert!(!pending_counter(&state).is_visible(), "nothing pending yet");
+
+    mark_workspace_unread_with_message(
+        &state,
+        &ws_id,
+        "Claude finished: tests pass",
+        false,
+        DesktopNotificationTarget {
+            workspace_id: ws_id.clone(),
+            pane_id: Some(finished.pane_id),
+            tab_id: Some(finished.tab_id.clone()),
+        },
+    );
+    let counter = pending_counter(&state);
+    assert!(counter.is_visible());
+    assert_eq!(pending_panel::counter_text(&state), "\u{25CF} 1");
+
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_until(wait, || pending_panel::open_entry_count(&state).is_some());
+    assert_eq!(pending_panel::open_entry_count(&state), Some(1));
+
+    pending_panel::activate_entry(&state, 0);
+    pump_until(wait, || {
+        pane::active_tab_in_pane(&pane).as_deref() == Some(finished.tab_id.as_str())
+            && focus_within(&state, &pane)
+            && pending_panel::open_entry_count(&state).is_none()
+    });
+    assert_eq!(
+        pane::active_tab_in_pane(&pane).as_deref(),
+        Some(finished.tab_id.as_str())
+    );
+    assert_focus_within("the finished tab", &state, &pane);
+    assert_eq!(
+        pending_panel::open_entry_count(&state),
+        None,
+        "the panel closed"
+    );
+    pump_for(std::time::Duration::from_millis(1500));
+    assert!(
+        pane::workspace_has_unread_tabs(&ws_id),
+        "viewing it keeps the mark"
+    );
+    pane::simulate_typing_in_tab(&finished.tab_id);
+    pump_until(wait, || !counter.is_visible());
+    assert!(
+        !pane::workspace_has_unread_tabs(&ws_id),
+        "typing into it reads it"
+    );
+    assert!(!counter.is_visible(), "nothing pending any more");
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+// A zoom keeps the other panes out of the workspace root. A finished terminal
+// in such a pane still counts, is listed, and "Mark all read" reaches it.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn pending_panel_reaches_a_pane_hidden_by_zoom() {
+    let (state, _temp) = pending_test_window("dev.limux.PendingZoomTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let kept = first_leaf_pane(&root);
+    let hidden = split_before(&state, &ws_id, &kept);
+    let finished = pane::active_surface_summary(&hidden).unwrap();
+    let (container, root) = {
+        let s = state.borrow();
+        let workspace = s.workspaces.iter().find(|w| w.id == ws_id).unwrap();
+        (workspace.split_container.clone(), workspace.root.clone())
+    };
+    assert!(container.toggle_zoom(&kept));
+    pump_until(wait, || !hidden.is_ancestor(&root));
+    assert!(!hidden.is_ancestor(&root), "the zoom hid the other pane");
+
+    mark_workspace_unread_with_message(
+        &state,
+        &ws_id,
+        "Claude finished behind the zoom",
+        false,
+        DesktopNotificationTarget {
+            workspace_id: ws_id.clone(),
+            pane_id: Some(finished.pane_id),
+            tab_id: Some(finished.tab_id.clone()),
+        },
+    );
+    pump_for(std::time::Duration::from_millis(1500));
+    let counter = pending_counter(&state);
+    assert!(counter.is_visible(), "the hidden pane counts");
+    assert_eq!(pending_panel::counter_text(&state), "\u{25CF} 1");
+
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_until(wait, || pending_panel::open_entry_count(&state).is_some());
+    assert_eq!(pending_panel::open_entry_count(&state), Some(1));
+
+    pending_panel::click_mark_all(&state);
+    pump_until(wait, || !pane::workspace_has_unread_tabs(&ws_id));
+    assert!(
+        !pane::workspace_has_unread_tabs(&ws_id),
+        "mark all read reached the hidden pane"
+    );
+    assert!(!counter.is_visible(), "nothing pending any more");
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+// With the top bar and the sidebar hidden, the counter moves next to the
+// sidebar toggle in the pane header, the panel still opens, and "Mark all
+// read" leaves a waiting terminal in place.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn pending_panel_works_with_both_bars_hidden() {
+    let (state, _temp) = pending_test_window("dev.limux.PendingPanelHiddenTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    let waiting = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    let finished = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    activate_workspace_shortcut(&state, 0);
+    pump_for(std::time::Duration::from_millis(1500));
+
+    agent_activity_ui::handle_agent_activity(
+        &state,
+        &WorkspaceTarget::Active,
+        &waiting.tab_id,
+        crate::agent_activity::AgentEvent {
+            tab_id: String::new(),
+            agent: "claude".to_string(),
+            phase: Some(crate::agent_activity::AgentPhase::NeedsApproval),
+            session_id: None,
+            at_ms: crate::agent_activity::now_ms(),
+            detail: Some("Bash: cargo test".to_string()),
+        },
+    )
+    .unwrap();
+    mark_workspace_unread_with_message(
+        &state,
+        &ws_id,
+        "Claude finished",
+        false,
+        DesktopNotificationTarget {
+            workspace_id: ws_id.clone(),
+            pane_id: Some(finished.pane_id),
+            tab_id: Some(finished.tab_id.clone()),
+        },
+    );
+
+    // Hide both bars the way the user does.
+    toggle_top_bar(&state);
+    toggle_sidebar(&state);
+    pump_for(std::time::Duration::from_millis(800));
+    let root = state.borrow().active_workspace().unwrap().root.clone();
+    let counter = pending_counter(&state);
+    assert!(!state.borrow().top_bar.as_ref().unwrap().is_visible());
+    assert!(
+        counter.is_ancestor(&root),
+        "with both bars hidden the counter sits in the pane header"
+    );
+    assert!(counter.is_visible());
+    assert_eq!(
+        pending_panel::counter_text(&state).as_str(),
+        "\u{25C6} 1 \u{25CF} 1",
+        "waiting and unread show together"
+    );
+
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_until(wait, || pending_panel::open_entry_count(&state).is_some());
+    assert_eq!(pending_panel::open_entry_count(&state), Some(2));
+
+    // Mark all read: the finished one turns quiet (still listed until it is
+    // closed, but not counted), the waiting one stays.
+    pending_panel::click_mark_all(&state);
+    pump_until(wait, || pending_panel::counter_text(&state) == "\u{25C6} 1");
+    assert_eq!(pending_panel::counter_text(&state), "\u{25C6} 1");
+    assert_eq!(pending_panel::open_entry_count(&state), Some(2));
+    assert!(!pane::workspace_has_unread_tabs(&ws_id));
+
+    // Ctrl+Alt+P again closes it.
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_until(wait, || pending_panel::open_entry_count(&state).is_none());
+    assert_eq!(pending_panel::open_entry_count(&state), None);
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+// Quitting an agent in a background tab does not leave its shell listed: the
+// agent's exit screen and the prompt coming back are not the shell working.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn quitting_an_agent_does_not_list_its_shell() {
+    let (state, _temp) = pending_test_window("dev.limux.AgentQuitTest");
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    let front = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    let back = pane::active_surface_summary(&pane).unwrap();
+    let (_, back_handle) = pane::terminal_tabs_in_pane(&pane)
+        .into_iter()
+        .find(|(tab_id, _)| *tab_id == back.tab_id)
+        .unwrap();
+    pump_for(std::time::Duration::from_millis(3200));
+    report(
+        &state,
+        &ws_id,
+        &back.tab_id,
+        crate::agent_activity::AgentPhase::Idle,
+        "",
+    );
+    // The agent's exit: it prints a little after its session ends.
+    assert!(back_handle
+        .send_text("sleep 2; i=0; while [ $i -lt 3 ]; do echo bye$i; i=$((i+1)); sleep 0.3; done"));
+    assert!(back_handle.send_key("Enter"));
+    agent_activity_ui::handle_agent_activity(
+        &state,
+        &WorkspaceTarget::Handle(ws_id.clone()),
+        &back.tab_id,
+        crate::agent_activity::AgentEvent {
+            tab_id: String::new(),
+            agent: "claude".to_string(),
+            phase: None,
+            session_id: None,
+            at_ms: crate::agent_activity::now_ms(),
+            detail: None,
+        },
+    )
+    .unwrap();
+    activate_desktop_notification_target(
+        &state,
+        &DesktopNotificationTarget {
+            workspace_id: ws_id.clone(),
+            pane_id: Some(front.pane_id),
+            tab_id: Some(front.tab_id.clone()),
+        },
+        None,
+    );
+    // The exit output, then the activity timeout to settle.
+    pump_for(std::time::Duration::from_secs(10));
+    assert!(
+        back_handle
+            .read_viewport_text()
+            .is_some_and(|text| text.contains("bye2")),
+        "it printed after the end; screen: {:?}",
+        back_handle.read_viewport_text()
+    );
+    assert_eq!(state.borrow().agent_activity.phase(&back.tab_id), None);
+    assert!(!pane::workspace_has_unread_tabs(&ws_id), "no finished mark");
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+// A shell that is slow to start (a system summary, a prompt that fills in
+// its git status) is not listed just for starting, as after a Limux restart.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn a_slow_shell_start_is_not_listed() {
+    // `sh` reads `$ENV` when it starts: print a few lines after 5 seconds.
+    let rc = std::env::temp_dir().join(format!("limux-slow-start-{}.sh", std::process::id()));
+    std::fs::write(
+        &rc,
+        "sleep 5; i=0; while [ $i -lt 3 ]; do echo slow-start$i; i=$((i+1)); sleep 0.3; done\n",
+    )
+    .unwrap();
+    std::env::set_var("ENV", &rc);
+    let (state, _temp) = pending_test_window("dev.limux.SlowStartTest");
+
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    let front = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    let back = pane::active_surface_summary(&pane).unwrap();
+    let (_, back_handle) = pane::terminal_tabs_in_pane(&pane)
+        .into_iter()
+        .find(|(tab_id, _)| *tab_id == back.tab_id)
+        .unwrap();
+    activate_desktop_notification_target(
+        &state,
+        &DesktopNotificationTarget {
+            workspace_id: ws_id.clone(),
+            pane_id: Some(front.pane_id),
+            tab_id: Some(front.tab_id.clone()),
+        },
+        None,
+    );
+    // Its start-up output, then the activity timeout to settle.
+    pump_for(std::time::Duration::from_secs(13));
+    std::env::remove_var("ENV");
+    let _ = std::fs::remove_file(&rc);
+    assert!(
+        back_handle
+            .read_viewport_text()
+            .is_some_and(|text| text.contains("slow-start2")),
+        "the shell printed after starting; screen: {:?}",
+        back_handle.read_viewport_text()
+    );
+    let phase = |tab_id: &str| state.borrow().agent_activity.phase(tab_id);
+    assert_eq!(phase(&back.tab_id), None, "starting is not activity");
+    assert_eq!(phase(&front.tab_id), None);
+    assert!(!pane::workspace_has_unread_tabs(&ws_id));
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+// A plain terminal that prints on its own in a background tab is listed as
+// working, turns unread when it stops, keeps that mark through a visit until
+// the user types, then stays listed as quiet until it is closed. Ctrl+Alt+O
+// goes back to the terminal used before.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn background_terminal_is_kept_until_closed() {
+    let (state, _temp) = pending_test_window("dev.limux.KeptTerminalTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    let front = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    let back = pane::active_surface_summary(&pane).unwrap();
+    let (_, back_handle) = pane::terminal_tabs_in_pane(&pane)
+        .into_iter()
+        .find(|(tab_id, _)| *tab_id == back.tab_id)
+        .unwrap();
+    let go_to = |tab_id: &str| {
+        activate_desktop_notification_target(
+            &state,
+            &DesktopNotificationTarget {
+                workspace_id: ws_id.clone(),
+                pane_id: Some(front.pane_id),
+                tab_id: Some(tab_id.to_string()),
+            },
+            None,
+        )
+    };
+    // Past the shell's start-up, then the command runs in the background.
+    pump_for(std::time::Duration::from_millis(3200));
+    assert!(back_handle.send_text(
+        "sleep 2; i=0; while [ $i -lt 6 ]; do echo tick$i; i=$((i+1)); sleep 0.3; done"
+    ));
+    assert!(back_handle.send_key("Enter"));
+    go_to(&front.tab_id);
+    pump_until(wait, || {
+        pane::active_tab_in_pane(&pane).as_deref() == Some(front.tab_id.as_str())
+    });
+    let phase = |tab_id: &str| state.borrow().agent_activity.phase(tab_id);
+    let long = std::time::Duration::from_secs(10);
+    pump_until(long, || {
+        phase(&back.tab_id) == Some(crate::agent_activity::AgentPhase::Working)
+    });
+    assert_eq!(
+        phase(&back.tab_id),
+        Some(crate::agent_activity::AgentPhase::Working),
+        "output of its own makes it working; screen: {:?}",
+        back_handle.read_viewport_text()
+    );
+    assert_eq!(
+        phase(&front.tab_id),
+        None,
+        "the tab the user only looked at is not listed"
+    );
+    assert_eq!(
+        agent_activity_ui::workspace_activity_counts(&state.borrow(), &ws_id).working,
+        1
+    );
+
+    // It stops while off screen: finished and unread.
+    pump_until(long, || pane::workspace_has_unread_tabs(&ws_id));
+    assert!(pane::workspace_has_unread_tabs(&ws_id));
+    assert_eq!(
+        phase(&back.tab_id),
+        Some(crate::agent_activity::AgentPhase::Idle)
+    );
+    assert_eq!(pending_panel::counter_text(&state), "\u{25CF} 1");
+
+    // A visit keeps the mark; typing reads it, and it stays listed.
+    go_to(&back.tab_id);
+    pump_for(std::time::Duration::from_millis(1500));
+    assert!(pane::workspace_has_unread_tabs(&ws_id), "a look keeps it");
+    pane::simulate_typing_in_tab(&back.tab_id);
+    pump_for(std::time::Duration::from_millis(200));
+    assert!(!pane::workspace_has_unread_tabs(&ws_id), "typing reads it");
+    assert_eq!(
+        agent_activity_ui::workspace_activity_counts(&state.borrow(), &ws_id).quiet,
+        1,
+        "kept as quiet"
+    );
+
+    // Ctrl+Alt+O goes back to the terminal used before, and again forth.
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::RecentWorkspace
+    ));
+    pump_until(wait, || {
+        pane::active_tab_in_pane(&pane).as_deref() == Some(front.tab_id.as_str())
+    });
+    assert_eq!(
+        pane::active_tab_in_pane(&pane).as_deref(),
+        Some(front.tab_id.as_str())
+    );
+    pump_for(std::time::Duration::from_millis(200));
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::RecentWorkspace
+    ));
+    pump_until(wait, || {
+        pane::active_tab_in_pane(&pane).as_deref() == Some(back.tab_id.as_str())
+    });
+    assert_eq!(
+        pane::active_tab_in_pane(&pane).as_deref(),
+        Some(back.tab_id.as_str())
+    );
+
+    // Closing it from the list drops it until it does something again.
+    agent_activity_ui::dismiss_terminal(&state, &back.tab_id);
+    assert_eq!(phase(&back.tab_id), None);
+    pump_for(std::time::Duration::from_millis(1500));
+    assert_eq!(phase(&back.tab_id), None, "it stays closed while quiet");
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+/// Save `widget` as a PNG when LIMUX_TEST_SNAPSHOT_DIR is set (manual review).
+fn snapshot_widget(widget: &gtk::Widget, name: &str) {
+    let Some(dir) = std::env::var_os("LIMUX_TEST_SNAPSHOT_DIR") else {
+        return;
+    };
+    let paintable = gtk::WidgetPaintable::new(Some(widget));
+    let snapshot = gtk::Snapshot::new();
+    // A dark backdrop, as popovers draw on their own (transparent) surface.
+    snapshot.append_color(
+        &gtk::gdk::RGBA::new(0.12, 0.12, 0.13, 1.0),
+        &gtk::graphene::Rect::new(0.0, 0.0, widget.width() as f32, widget.height() as f32),
+    );
+    paintable.snapshot(&snapshot, widget.width() as f64, widget.height() as f64);
+    let Some(node) = snapshot.to_node() else {
+        return;
+    };
+    let renderer = widget
+        .native()
+        .and_then(|native| native.renderer())
+        .unwrap();
+    let texture = renderer.render_texture(&node, None);
+    texture
+        .save_to_png(std::path::Path::new(&dir).join(format!("{name}.png")))
+        .unwrap();
+}
+
+// The ▸ on a project row lists its terminals as tabs: one chip per terminal,
+// the one on screen marked, background ones dimmed, and a click focuses it.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn session_rows_list_terminals_as_tabs() {
+    let (state, _temp) = pending_test_window("dev.limux.SessionRowsTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    let first = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    let second = pane::active_surface_summary(&pane).unwrap();
+    activate_workspace_shortcut(&state, 0);
+    pump_for(std::time::Duration::from_millis(500));
+    agent_activity_ui::handle_agent_activity(
+        &state,
+        &WorkspaceTarget::Active,
+        &first.tab_id,
+        crate::agent_activity::AgentEvent {
+            tab_id: String::new(),
+            agent: "claude".to_string(),
+            phase: Some(crate::agent_activity::AgentPhase::Working),
+            session_id: None,
+            at_ms: crate::agent_activity::now_ms(),
+            detail: Some("Bash: cargo test".to_string()),
+        },
+    )
+    .unwrap();
+
+    let (toggle, sessions, sidebar) = {
+        let s = state.borrow();
+        let workspace = s.workspaces.iter().find(|w| w.id == ws_id).unwrap();
+        (
+            workspace.sessions_toggle.clone(),
+            workspace.sessions_box.clone(),
+            s.sidebar_shell.clone(),
+        )
+    };
+    let chips = |sessions: &gtk::Box| -> Vec<gtk::Button> {
+        widget_tree(sessions.upcast_ref())
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+            .filter(|button| button.has_css_class("limux-session-row"))
+            .collect()
+    };
+    // Closed, a single active terminal puts what it does under the project
+    // name, with no chip.
+    pump_for(std::time::Duration::from_millis(300));
+    assert!(sessions.is_visible(), "an active terminal shows without ▸");
+    assert!(
+        chips(&sessions).is_empty(),
+        "one active terminal needs no chip"
+    );
+    let lines: Vec<String> = widget_tree(sessions.upcast_ref())
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+        .filter(|label| label.has_css_class("limux-ws-activity-line"))
+        .map(|label| label.label().to_string())
+        .collect();
+    assert_eq!(lines, ["Bash: cargo test"]);
+    snapshot_widget(sidebar.upcast_ref(), "session-rows-closed");
+
+    toggle.emit_clicked();
+    pump_for(std::time::Duration::from_millis(300));
+    assert!(sessions.is_visible());
+    let rows = chips(&sessions);
+    assert_eq!(rows.len(), 2, "▸ shows every terminal");
+    assert!(
+        rows[1].has_css_class("limux-session-row-shown"),
+        "the tab on screen is marked"
+    );
+    assert!(
+        rows[0].has_css_class("limux-session-row-background"),
+        "the background tab is dimmed"
+    );
+    snapshot_widget(sidebar.upcast_ref(), "session-rows");
+
+    rows[0].emit_clicked();
+    pump_until(wait, || {
+        pane::active_tab_in_pane(&pane).as_deref() == Some(first.tab_id.as_str())
+    });
+    assert_eq!(
+        pane::active_tab_in_pane(&pane).as_deref(),
+        Some(first.tab_id.as_str())
+    );
+    let _ = second;
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+/// Adds a named one-pane workspace and returns its id and pane.
+fn add_named_workspace(state: &State, name: &str) -> (String, gtk::Widget) {
+    add_workspace_from_state(
+        state,
+        &WorkspaceState {
+            color: None,
+            group_id: None,
+            id: None,
+            name: name.to_string(),
+            favorite: false,
+            cwd: None,
+            folder_path: None,
+            autostart_command: None,
+            layout: LayoutNodeState::Pane(PaneState::fallback(None)),
+        },
+    );
+    let s = state.borrow();
+    let workspace = s.workspaces.last().unwrap();
+    let pane = first_leaf_pane(&workspace.root);
+    (workspace.id.clone(), pane)
+}
+
+fn report(
+    state: &State,
+    ws_id: &str,
+    tab_id: &str,
+    phase: crate::agent_activity::AgentPhase,
+    detail: &str,
+) {
+    agent_activity_ui::handle_agent_activity(
+        state,
+        &WorkspaceTarget::Handle(ws_id.to_string()),
+        tab_id,
+        crate::agent_activity::AgentEvent {
+            tab_id: String::new(),
+            agent: "claude".to_string(),
+            phase: Some(phase),
+            session_id: None,
+            at_ms: crate::agent_activity::now_ms(),
+            detail: (!detail.is_empty()).then(|| detail.to_string()),
+        },
+    )
+    .unwrap();
+}
+
+// A collapsed group's `● N` goes to an unread terminal even while another
+// waits, and `+N more` focuses the terminal that put a project there, here a
+// quiet agent in a background tab.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn group_counts_and_overflow_reach_the_right_terminal() {
+    use crate::agent_activity::AgentPhase::{Idle, NeedsApproval, Working};
+    let (state, _temp) = pending_test_window("dev.limux.GroupJumpTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (home_id, _) = add_named_workspace(&state, "home");
+    let mut members = Vec::new();
+    let mut tabs = Vec::new();
+    for name in ["waits", "finished", "w1", "w2", "w3", "quiet"] {
+        let (id, pane) = add_named_workspace(&state, name);
+        tabs.push(pane::active_surface_summary(&pane).unwrap());
+        if name == "quiet" {
+            // The quiet agent sits in a background tab.
+            pane::add_terminal_tab_to_pane(&pane);
+        }
+        members.push(id);
+    }
+    let group = sidebar_groups::create_group(&state, Some("G"), None, &members).unwrap();
+    sidebar_groups::set_group_collapsed(&state, &group, true).unwrap();
+    let index_of = |id: &str| {
+        state
+            .borrow()
+            .workspaces
+            .iter()
+            .position(|w| w.id == id)
+            .unwrap()
+    };
+    select_workspace_by_index(&state, index_of(&home_id));
+    pump_for(std::time::Duration::from_millis(500));
+
+    report(
+        &state,
+        &members[0],
+        &tabs[0].tab_id,
+        NeedsApproval,
+        "Bash: ls",
+    );
+    mark_workspace_unread_with_message(
+        &state,
+        &members[1],
+        "Claude finished",
+        false,
+        DesktopNotificationTarget {
+            workspace_id: members[1].clone(),
+            pane_id: Some(tabs[1].pane_id),
+            tab_id: Some(tabs[1].tab_id.clone()),
+        },
+    );
+    for i in 2..5 {
+        report(&state, &members[i], &tabs[i].tab_id, Working, "Edit: x");
+    }
+    report(&state, &members[5], &tabs[5].tab_id, Idle, "");
+    pump_for(std::time::Duration::from_millis(300));
+
+    let active_id = || state.borrow().active_workspace().unwrap().id.clone();
+    sidebar_groups::click_unread_count(&state, &group);
+    pump_until(wait, || active_id() == members[1]);
+    assert_eq!(
+        active_id(),
+        members[1],
+        "the unread count reaches the finished project, not the waiting one"
+    );
+
+    select_workspace_by_index(&state, index_of(&home_id));
+    pump_for(std::time::Duration::from_millis(300));
+    sidebar_groups::click_more(&state, &group);
+    let quiet_pane = first_leaf_pane(&state.borrow().workspaces[index_of(&members[5])].root);
+    pump_until(wait, || {
+        active_id() == members[5]
+            && pane::active_tab_in_pane(&quiet_pane).as_deref() == Some(tabs[5].tab_id.as_str())
+    });
+    assert_eq!(active_id(), members[5], "+1 more goes to the quiet project");
+    assert_eq!(
+        pane::active_tab_in_pane(&quiet_pane).as_deref(),
+        Some(tabs[5].tab_id.as_str()),
+        "and to its quiet terminal, not the tab in front"
+    );
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+// A note that arrives while the agent works (a background agent finished)
+// does not stop the spinner: the project keeps showing working, and its `●`
+// shows once the agent stops.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn a_note_while_working_keeps_the_spinner_until_it_stops() {
+    use crate::agent_activity::AgentPhase::{Idle, Working};
+    let (state, _temp) = pending_test_window("dev.limux.NoteWhileWorkingTest");
+    let wait = std::time::Duration::from_secs(5);
+
+    let (home_id, _) = add_named_workspace(&state, "home");
+    let (ws_id, pane) = add_named_workspace(&state, "AyahLoop");
+    let tab = pane::active_surface_summary(&pane).unwrap();
+    let index = state
+        .borrow()
+        .workspaces
+        .iter()
+        .position(|w| w.id == home_id)
+        .unwrap();
+    select_workspace_by_index(&state, index);
+    pump_for(std::time::Duration::from_millis(300));
+
+    report(&state, &ws_id, &tab.tab_id, Working, "Poll");
+    mark_workspace_unread_with_message(
+        &state,
+        &ws_id,
+        "Claude: ca842437 finished",
+        false,
+        DesktopNotificationTarget {
+            workspace_id: ws_id.clone(),
+            pane_id: Some(tab.pane_id),
+            tab_id: Some(tab.tab_id.clone()),
+        },
+    );
+    pump_for(std::time::Duration::from_millis(300));
+    let (spinner, dot) = {
+        let s = state.borrow();
+        let workspace = s.workspaces.iter().find(|w| w.id == ws_id).unwrap();
+        (
+            workspace.row_extras.spinner.clone(),
+            workspace.notify_dot.clone(),
+        )
+    };
+    assert!(pane::workspace_has_unread_tabs(&ws_id), "the note is kept");
+    assert!(spinner.is_visible(), "the row keeps its spinner");
+    assert!(!dot.is_visible(), "no dot while it works");
+    assert_eq!(
+        pending_panel::counter_text(&state),
+        format!("{} 1", crate::agent_activity::GLYPH_WORKING)
+    );
+
+    report(&state, &ws_id, &tab.tab_id, Idle, "");
+    pump_until(wait, || dot.is_visible());
+    assert!(
+        dot.is_visible(),
+        "once it stops, the note shows as finished"
+    );
+    assert!(!spinner.is_visible());
+    assert_eq!(pending_panel::counter_text(&state), "\u{25CF} 1");
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+// Not a check: builds a realistic sidebar (two groups, one collapsed, agents
+// working, waiting and finished) and saves pictures of each view for a UX
+// review. Run with LIMUX_TEST_SNAPSHOT_DIR set.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn ux_tour_snapshots() {
+    use crate::agent_activity::AgentPhase::*;
+    let (state, _temp) = pending_test_window("dev.limux.UxTour");
+    let window = state.borrow().window.clone();
+    window.set_default_size(1280, 800);
+
+    let clients = [
+        ("api-server", Some(Working), "Bash: cargo test --workspace"),
+        ("billing", Some(NeedsApproval), "Bash: psql -f migrate.sql"),
+        ("docs-site", None, ""),
+        ("mobile-app", None, "finished"),
+        ("infra", Some(Working), "Edit: main.tf"),
+        ("search", Some(Working), "Grep: fn rank"),
+    ];
+    let mut client_ids = Vec::new();
+    let mut reports = Vec::new();
+    for (name, phase, detail) in clients {
+        let (id, pane) = add_named_workspace(&state, name);
+        let tab = pane::active_surface_summary(&pane).unwrap();
+        client_ids.push(id.clone());
+        reports.push((id, tab, phase, detail));
+    }
+    let (limux_id, limux_pane) = add_named_workspace(&state, "limux");
+    let limux_first = pane::active_surface_summary(&limux_pane).unwrap();
+    pane::add_terminal_tab_to_pane(&limux_pane);
+    let limux_second = pane::active_surface_summary(&limux_pane).unwrap();
+    pane::add_terminal_tab_to_pane(&limux_pane);
+    let limux_shell = pane::active_surface_summary(&limux_pane).unwrap();
+    let (ghostty_id, ghostty_pane) = add_named_workspace(&state, "ghostty");
+    let ghostty_tab = pane::active_surface_summary(&ghostty_pane).unwrap();
+    let (notes_id, notes_pane) = add_named_workspace(&state, "notes");
+    let notes_tab = pane::active_surface_summary(&notes_pane).unwrap();
+    pump_until(std::time::Duration::from_secs(5), || {
+        live_terminal(&notes_pane, &notes_tab.surface_id)
+    });
+
+    let clients_group = sidebar_groups::create_group(
+        &state,
+        Some("Clients"),
+        Some(WorkspaceColor::Blue),
+        &client_ids,
+    )
+    .unwrap();
+    sidebar_groups::create_group(
+        &state,
+        Some("Limux"),
+        Some(WorkspaceColor::Teal),
+        &[limux_id.clone(), ghostty_id.clone()],
+    )
+    .unwrap();
+    sidebar_groups::set_group_collapsed(&state, &clients_group, true).unwrap();
+    let limux_index = state
+        .borrow()
+        .workspaces
+        .iter()
+        .position(|w| w.id == limux_id)
+        .unwrap();
+    select_workspace_by_index(&state, limux_index);
+    pump_for(std::time::Duration::from_millis(800));
+
+    for (id, tab, phase, detail) in &reports {
+        match phase {
+            Some(phase) => report(&state, id, &tab.tab_id, *phase, detail),
+            None if *detail == "finished" => {
+                mark_workspace_unread_with_message(
+                    &state,
+                    id,
+                    "Claude finished: all 214 tests pass",
+                    false,
+                    DesktopNotificationTarget {
+                        workspace_id: id.clone(),
+                        pane_id: Some(tab.pane_id),
+                        tab_id: Some(tab.tab_id.clone()),
+                    },
+                );
+            }
+            None => report(&state, id, &tab.tab_id, Idle, ""),
+        }
+    }
+    report(
+        &state,
+        &limux_id,
+        &limux_first.tab_id,
+        Working,
+        "Bash: ./scripts/check.sh",
+    );
+    report(
+        &state,
+        &limux_id,
+        &limux_second.tab_id,
+        NeedsInput,
+        "Which branch should I rebase onto?",
+    );
+    mark_workspace_unread_with_message(
+        &state,
+        &ghostty_id,
+        "Claude finished: zig build passed",
+        false,
+        DesktopNotificationTarget {
+            workspace_id: ghostty_id.clone(),
+            pane_id: Some(ghostty_tab.pane_id),
+            tab_id: Some(ghostty_tab.tab_id.clone()),
+        },
+    );
+    // A plain shell that finished a build and was read: kept as quiet.
+    state
+        .borrow_mut()
+        .agent_activity
+        .keep(&limux_shell.tab_id, crate::agent_activity::now_ms());
+    pending_panel::note_message(
+        &mut state.borrow_mut(),
+        &limux_id,
+        Some(&limux_shell.tab_id),
+        "Finished",
+    );
+    // The notes shell exits while nobody watches: held with Restart / Close.
+    let (_, notes_handle) =
+        pane::terminal_handle_for_surface(&notes_pane, Some(&notes_tab.surface_id)).unwrap();
+    assert!(notes_handle.send_text("exit 2"));
+    assert!(notes_handle.send_key("enter"));
+    pump_until(std::time::Duration::from_secs(5), || {
+        notes_handle.health().process_exited
+    });
+    agent_activity_ui::refresh_activity(&state);
+    pump_for(std::time::Duration::from_millis(1500));
+    let content = window.child().unwrap();
+    snapshot_widget(&content, "tour-1-overview");
+    let sidebar = state.borrow().sidebar_shell.clone();
+    snapshot_widget(sidebar.upcast_ref(), "tour-2-sidebar");
+
+    let toggle = {
+        let s = state.borrow();
+        s.workspaces
+            .iter()
+            .find(|w| w.id == limux_id)
+            .unwrap()
+            .sessions_toggle
+            .clone()
+    };
+    toggle.emit_clicked();
+    pump_for(std::time::Duration::from_millis(400));
+    snapshot_widget(sidebar.upcast_ref(), "tour-3-sidebar-all-terminals");
+    toggle.emit_clicked();
+
+    sidebar_groups::set_group_collapsed(&state, &clients_group, false).unwrap();
+    pump_for(std::time::Duration::from_millis(400));
+    snapshot_widget(sidebar.upcast_ref(), "tour-4-sidebar-group-expanded");
+    sidebar_groups::set_group_collapsed(&state, &clients_group, true).unwrap();
+    pump_for(std::time::Duration::from_millis(400));
+
+    // Test terminals print nothing, so agents settle to idle after 10 s of
+    // silence; report the working ones again before the panel.
+    for (id, tab, phase, detail) in &reports {
+        if *phase == Some(Working) {
+            report(&state, id, &tab.tab_id, Working, detail);
+        }
+    }
+    report(
+        &state,
+        &limux_id,
+        &limux_first.tab_id,
+        Working,
+        "Bash: ./scripts/check.sh",
+    );
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_until(std::time::Duration::from_secs(5), || {
+        pending_panel::open_entry_count(&state).is_some()
+    });
+    pump_for(std::time::Duration::from_millis(400));
+    let popover = pending_panel::open_popover(&state).unwrap();
+    snapshot_widget(popover.upcast_ref(), "tour-5-pending-panel");
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_for(std::time::Duration::from_millis(300));
+
+    toggle_top_bar(&state);
+    toggle_sidebar(&state);
+    pump_for(std::time::Duration::from_millis(800));
+    snapshot_widget(&content, "tour-7-full-screen");
+    toggle_top_bar(&state);
+    toggle_sidebar(&state);
+
+    // The held exit, opened.
+    let notes_index = state
+        .borrow()
+        .workspaces
+        .iter()
+        .position(|w| w.id == notes_id)
+        .unwrap();
+    select_workspace_by_index(&state, notes_index);
+    pump_for(std::time::Duration::from_millis(800));
+    snapshot_widget(&content, "tour-10-held-exit");
+    let _ = (limux_second, limux_pane);
+    window.close();
+}
+
+// Claude Code is set up here but without Limux hooks: the sidebar says how to
+// add them. The empty agents panel explains the signs.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn hooks_card_and_empty_panel_explain_themselves() {
+    let claude = tempfile::tempdir().unwrap();
+    std::fs::write(claude.path().join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+    std::env::set_var("CLAUDE_CONFIG_DIR", claude.path());
+    let (state, _temp) = pending_test_window("dev.limux.HooksCardTest");
+    show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    pump_for(std::time::Duration::from_millis(500));
+
+    let sidebar = state.borrow().sidebar_shell.clone();
+    let card = widget_tree(sidebar.upcast_ref())
+        .into_iter()
+        .find(|widget| widget.has_css_class("limux-hooks-card"))
+        .expect("the hooks card is in the sidebar");
+    assert!(
+        card.is_visible(),
+        "Claude without Limux hooks shows the card"
+    );
+    snapshot_widget(sidebar.upcast_ref(), "tour-8-no-hooks");
+
+    assert!(dispatch_shortcut_command(
+        &state,
+        ShortcutCommand::PendingPanel
+    ));
+    pump_until(std::time::Duration::from_secs(5), || {
+        pending_panel::open_entry_count(&state).is_some()
+    });
+    assert_eq!(pending_panel::open_entry_count(&state), Some(0));
+    pump_for(std::time::Duration::from_millis(300));
+    let popover = pending_panel::open_popover(&state).unwrap();
+    let legend = widget_tree(popover.upcast_ref())
+        .into_iter()
+        .any(|widget| widget.has_css_class("limux-pending-legend"));
+    assert!(legend, "the empty panel shows the legend");
+    snapshot_widget(popover.upcast_ref(), "tour-9-empty-panel");
 
     let window = state.borrow().window.clone();
     window.close();

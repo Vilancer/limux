@@ -357,9 +357,49 @@ pub(super) fn next_unread_stop(
     }
 }
 
-/// Jump to the next (or previous) unread terminal in sidebar order, across
-/// projects and collapsed groups, and focus that exact tab.
+/// Jump to the next (or previous) terminal that needs the user, in sidebar
+/// order across projects and collapsed groups, and focus that exact tab:
+/// an agent waiting for approval or input first, else an unread terminal.
 pub(super) fn cycle_unread_terminal(state: &State, forward: bool) {
+    cycle_attention_terminal(state, forward, None);
+}
+
+/// Go to the next working terminal of a group's projects (the group header's
+/// working button), leaving the group as it is.
+pub(super) fn cycle_working_terminal(state: &State, group: &str) {
+    cycle_terminals(state, true, Some(group), CycleStops::Working);
+}
+
+/// As `cycle_unread_terminal`; with `group`, only that group's projects
+/// (the group header's waiting button).
+pub(super) fn cycle_attention_terminal(state: &State, forward: bool, group: Option<&str>) {
+    cycle_terminals(state, forward, group, CycleStops::Attention);
+}
+
+/// The next unread terminal of a group's projects (the group header's unread
+/// button), even while others wait.
+pub(super) fn cycle_unread_in_group(state: &State, group: &str) {
+    cycle_terminals(state, true, Some(group), CycleStops::Unread);
+}
+
+/// Which terminals a cycle stops at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CycleStops {
+    /// Waiting ones, else unread ones.
+    Attention,
+    Unread,
+    Working,
+}
+
+fn cycle_terminals(state: &State, forward: bool, group: Option<&str>, kind: CycleStops) {
+    let members = group.map(|group| {
+        state
+            .borrow()
+            .sidebar
+            .group(group)
+            .map(|group| group.members().to_vec())
+            .unwrap_or_default()
+    });
     let (workspaces, active_idx) = {
         let s = state.borrow();
         let workspaces = s
@@ -380,7 +420,15 @@ pub(super) fn cycle_unread_terminal(state: &State, forward: bool) {
     let mut current = (active_idx, 0, 0);
     let mut stops = Vec::new();
     let mut targets = Vec::new();
+    let mut agent_stops = Vec::new();
+    let mut agent_targets = Vec::new();
     for (workspace_idx, (workspace_id, panes, workspace_unread)) in workspaces.iter().enumerate() {
+        if members
+            .as_ref()
+            .is_some_and(|members| !members.contains(workspace_id))
+        {
+            continue;
+        }
         let mut tab_unread = false;
         for (pane_idx, pane_widget) in panes.iter().enumerate() {
             let Some(pane::PaneUnreadTabs {
@@ -396,6 +444,26 @@ pub(super) fn cycle_unread_terminal(state: &State, forward: bool) {
                 .is_some_and(|(id, focused_pane)| id == workspace_id && focused_pane == pane_widget)
             {
                 current = (workspace_idx, pane_idx, active_tab);
+            }
+            for (tab_idx, tab_id) in pane::tab_ids_in_pane(pane_widget).into_iter().enumerate() {
+                let phase = state.borrow().agent_activity.phase(&tab_id);
+                let matches = match kind {
+                    CycleStops::Working => {
+                        phase == Some(crate::agent_activity::AgentPhase::Working)
+                    }
+                    CycleStops::Attention => {
+                        phase.is_some_and(crate::agent_activity::AgentPhase::is_waiting)
+                    }
+                    CycleStops::Unread => false,
+                };
+                if matches {
+                    agent_stops.push((workspace_idx, pane_idx, tab_idx));
+                    agent_targets.push(DesktopNotificationTarget {
+                        workspace_id: workspace_id.clone(),
+                        pane_id: Some(pane_id),
+                        tab_id: Some(tab_id),
+                    });
+                }
             }
             for (tab_idx, tab_id) in unread_tabs {
                 tab_unread = true;
@@ -417,6 +485,10 @@ pub(super) fn cycle_unread_terminal(state: &State, forward: bool) {
             });
         }
     }
+    if kind == CycleStops::Working || !agent_stops.is_empty() {
+        stops = agent_stops;
+        targets = agent_targets;
+    }
     if let Some(index) = next_unread_stop(&stops, current, forward) {
         activate_desktop_notification_target(state, &targets[index], None);
     }
@@ -426,12 +498,46 @@ pub(super) fn has_unread(workspace_unread: bool, tab_unread: bool) -> bool {
     workspace_unread || tab_unread
 }
 
-pub(super) fn set_workspace_unread_visual(workspace: &Workspace, unread: bool) {
-    if unread {
+/// Paint unread on a project row and pill. The row dot and pill dot show the
+/// project signal (waiting, unread or working), painted with it.
+/// `unread` keeps the message line; `finished` (unread and not working, see
+/// `agent_activity_ui::has_finished_unread`) decides the sign.
+pub(super) fn set_workspace_unread_visual(
+    workspace: &Workspace,
+    unread: bool,
+    finished: bool,
+    counts: crate::agent_activity::ActivityCounts,
+) {
+    let signal = crate::agent_activity::ProjectSignal::of(counts, finished);
+    agent_activity_ui::set_workspace_signal_visual(workspace, signal, counts);
+    let attention = signal.needs_attention();
+    if attention {
         workspace
-            .notify_dot
-            .remove_css_class("limux-notify-dot-hidden");
-        workspace.notify_dot.add_css_class("limux-notify-dot");
+            .indicator_button
+            .add_css_class("limux-indicator-pill-unread");
+    } else {
+        workspace
+            .indicator_button
+            .remove_css_class("limux-indicator-pill-unread");
+    }
+    if attention {
+        workspace
+            .indicator_unread_dot
+            .remove_css_class("limux-indicator-unread-dot-hidden");
+        workspace
+            .indicator_unread_dot
+            .add_css_class("limux-indicator-unread-dot");
+        workspace.indicator_unread_dot.set_visible(true);
+    } else {
+        workspace
+            .indicator_unread_dot
+            .remove_css_class("limux-indicator-unread-dot");
+        workspace
+            .indicator_unread_dot
+            .add_css_class("limux-indicator-unread-dot-hidden");
+        workspace.indicator_unread_dot.set_visible(false);
+    }
+    if unread {
         workspace.notify_label.remove_css_class("limux-notify-msg");
         workspace
             .notify_label
@@ -442,21 +548,7 @@ pub(super) fn set_workspace_unread_visual(workspace: &Workspace, unread: bool) {
         if let Some(row_box) = workspace.sidebar_row.child() {
             row_box.add_css_class("limux-sidebar-row-unread");
         }
-        workspace
-            .indicator_button
-            .add_css_class("limux-indicator-pill-unread");
-        workspace
-            .indicator_unread_dot
-            .remove_css_class("limux-indicator-unread-dot-hidden");
-        workspace
-            .indicator_unread_dot
-            .add_css_class("limux-indicator-unread-dot");
-        workspace.indicator_unread_dot.set_visible(true);
     } else {
-        workspace.notify_dot.remove_css_class("limux-notify-dot");
-        workspace
-            .notify_dot
-            .add_css_class("limux-notify-dot-hidden");
         workspace
             .notify_label
             .remove_css_class("limux-notify-msg-unread");
@@ -466,20 +558,17 @@ pub(super) fn set_workspace_unread_visual(workspace: &Workspace, unread: bool) {
         if let Some(row_box) = workspace.sidebar_row.child() {
             row_box.remove_css_class("limux-sidebar-row-unread");
         }
-        workspace
-            .indicator_button
-            .remove_css_class("limux-indicator-pill-unread");
-        workspace
-            .indicator_unread_dot
-            .remove_css_class("limux-indicator-unread-dot");
-        workspace
-            .indicator_unread_dot
-            .add_css_class("limux-indicator-unread-dot-hidden");
-        workspace.indicator_unread_dot.set_visible(false);
     }
 }
 
+/// Repaint a project's unread and activity signs and its group header.
 pub(super) fn sync_workspace_unread(state: &State, ws_id: &str) {
+    paint_workspace_unread(state, ws_id);
+    sidebar_groups::sync_group_headers(state);
+}
+
+/// Repaint a project's unread and activity signs only.
+pub(super) fn paint_workspace_unread(state: &State, ws_id: &str) {
     let workspace_unread = {
         let s = state.borrow();
         let Some(workspace) = s.workspaces.iter().find(|workspace| workspace.id == ws_id) else {
@@ -488,51 +577,20 @@ pub(super) fn sync_workspace_unread(state: &State, ws_id: &str) {
         workspace.unread || workspace.manual_unread
     };
     let tab_unread = pane::workspace_has_unread_tabs(ws_id);
-    let s = state.borrow();
-    if let Some(workspace) = s.workspaces.iter().find(|workspace| workspace.id == ws_id) {
-        set_workspace_unread_visual(workspace, has_unread(workspace_unread, tab_unread));
+    {
+        let s = state.borrow();
+        if let Some(workspace) = s.workspaces.iter().find(|workspace| workspace.id == ws_id) {
+            let counts = agent_activity_ui::workspace_activity_counts(&s, ws_id);
+            let finished = agent_activity_ui::has_finished_unread(&s, ws_id, workspace_unread);
+            set_workspace_unread_visual(
+                workspace,
+                has_unread(workspace_unread, tab_unread),
+                finished,
+                counts,
+            );
+        }
     }
-}
-
-pub(super) fn clear_visible_tab_unread(state: &State, ws_id: &str) {
-    let root = {
-        let mut s = state.borrow_mut();
-        if !s.window.is_active() {
-            return;
-        }
-        let Some(workspace) = s
-            .workspaces
-            .iter_mut()
-            .find(|workspace| workspace.id == ws_id)
-        else {
-            return;
-        };
-        workspace.unread = false;
-        workspace.manual_unread = false;
-        workspace.root.clone()
-    };
-    pane::clear_active_tab_unread_in_root(&root);
-    sync_workspace_unread(state, ws_id);
-}
-
-pub(super) fn clear_visible_tab_unread_on_window_focus(state: &State, ws_id: &str) {
-    let root = {
-        let mut s = state.borrow_mut();
-        if !s.window.is_active() {
-            return;
-        }
-        let Some(workspace) = s
-            .workspaces
-            .iter_mut()
-            .find(|workspace| workspace.id == ws_id)
-        else {
-            return;
-        };
-        workspace.unread = false;
-        workspace.root.clone()
-    };
-    pane::clear_active_tab_unread_in_root_if_not_manual(&root);
-    sync_workspace_unread(state, ws_id);
+    agent_activity_ui::refresh_session_rows(state, ws_id, false);
 }
 
 pub(super) fn mark_workspace_unread(
@@ -585,6 +643,12 @@ pub(super) fn mark_workspace_unread_with_message(
         )
     };
     let workspace_is_active = workspace_idx == active_idx;
+    pending_panel::note_message(
+        &mut state.borrow_mut(),
+        ws_id,
+        target.tab_id.as_deref(),
+        message,
+    );
     let desktop_request = should_emit_desktop_notification(
         notifications.enabled,
         window_active,

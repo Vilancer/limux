@@ -9,6 +9,7 @@ pub enum MethodCategory {
     Notification,
     Tab,
     GuiHook,
+    Agent,
     Browser,
     Debug,
 }
@@ -239,7 +240,7 @@ pub const CORE_COMMAND_NAMES: [&str; 166] = [
     "debug.window.screenshot",
 ];
 
-pub const HOST_ONLY_COMMAND_NAMES: [&str; 12] = [
+pub const HOST_ONLY_COMMAND_NAMES: [&str; 13] = [
     "window.activate",
     "workspace.set_color",
     "workspace.set_group",
@@ -252,9 +253,10 @@ pub const HOST_ONLY_COMMAND_NAMES: [&str; 12] = [
     "gui_hook.list",
     "gui_hook.set",
     "gui_hook.clear",
+    "agent.activity",
 ];
 
-pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 50] = [
+pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 51] = [
     "system.ping",
     "system.identify",
     "system.capabilities",
@@ -299,6 +301,7 @@ pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 50] = [
     "gui_hook.list",
     "gui_hook.set",
     "gui_hook.clear",
+    "agent.activity",
     "browser.open_split",
     "browser.navigate",
     "browser.url.get",
@@ -307,7 +310,7 @@ pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 50] = [
     "browser.reload",
 ];
 
-pub const ALL_METHOD_SPECS: [MethodSpec; 178] = [
+pub const ALL_METHOD_SPECS: [MethodSpec; 179] = [
     shared_spec("system.ping", MethodCategory::System, &["ping"], &[]),
     shared_spec(
         "system.identify",
@@ -562,6 +565,7 @@ pub const ALL_METHOD_SPECS: [MethodSpec; 178] = [
     gtk_bridge_only_spec("gui_hook.list", MethodCategory::GuiHook, &[], &[]),
     gtk_bridge_only_spec("gui_hook.set", MethodCategory::GuiHook, &[], &[]),
     gtk_bridge_only_spec("gui_hook.clear", MethodCategory::GuiHook, &[], &[]),
+    gtk_bridge_only_spec("agent.activity", MethodCategory::Agent, &[], &[]),
     shared_spec(
         "browser.open_split",
         MethodCategory::Browser,

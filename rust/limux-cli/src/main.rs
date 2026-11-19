@@ -1063,6 +1063,89 @@ fn agy_stop_suppresses_notification(payload: &Value) -> bool {
         || hook_str(payload, &["terminationReason"]) == Some("USER_CANCELED")
 }
 
+/// Subagents of a Claude Code session that still run when its turn ends. It
+/// wakes up on its own when they finish, so the turn's end is not the end
+/// of the work. Background shell commands do not count: a server never ends.
+fn claude_running_subagents(payload: &Value) -> Vec<&str> {
+    payload
+        .get("background_tasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|task| {
+            hook_str(task, &["status"]) == Some("running")
+                && hook_str(task, &["type"]).is_some_and(|kind| kind != "shell")
+        })
+        .map(|task| hook_str(task, &["description"]).unwrap_or("background agent"))
+        .collect()
+}
+
+/// The notification (title, body) a hook event posts, if any.
+fn agent_hook_notification(
+    agent: agent_hooks::AgentKind,
+    event: &str,
+    payload: &Value,
+) -> Option<(String, String)> {
+    let agent_label = agent.label();
+    match event {
+        // A background agent finishing is not the session finishing: the
+        // main agent picks its result up and reports when it is done.
+        "Notification" | "notification"
+            if hook_str(payload, &["notification_type", "notificationType"])
+                == Some("agent_completed") =>
+        {
+            None
+        }
+        // A message Claude chose to send does not ask for anything.
+        "Notification" | "notification"
+            if hook_str(payload, &["notification_type", "notificationType"])
+                == Some("push_notification") =>
+        {
+            Some((
+                agent_label.to_string(),
+                hook_str(payload, &["message", "notification"])
+                    .unwrap_or("update")
+                    .to_owned(),
+            ))
+        }
+        "Notification" | "notification" => Some((
+            format!("{agent_label} needs you"),
+            hook_str(payload, &["message", "notification"])
+                .unwrap_or("waiting for input")
+                .to_owned(),
+        )),
+        "Stop" | "stop" | "finished" => {
+            if (agent == agent_hooks::AgentKind::Agy && agy_stop_suppresses_notification(payload))
+                || !claude_running_subagents(payload).is_empty()
+            {
+                None
+            } else {
+                // What it last said tells the tasks apart.
+                let body = hook_str(payload, &["last_assistant_message"])
+                    .map(|message| one_line(&plain_text(message), 140))
+                    .filter(|line| !line.is_empty())
+                    .or_else(|| hook_str(payload, &["message", "reason"]).map(str::to_owned))
+                    .unwrap_or_else(|| "task complete".to_owned());
+                Some((format!("{agent_label} finished"), body))
+            }
+        }
+        "SessionStart" | "session-start" | "SessionEnd" | "session-end" | "UserPromptSubmit"
+        | "prompt-submit" | "PreToolUse" | "PostToolUse" | "post-tool-use" | "SubagentStop"
+        | "subagent-stop" | "Cleanup" | "cleanup" | "restore-exit" => None,
+        other => Some((
+            format!("{agent_label}: {other}"),
+            hook_str(payload, &["message", "summary"])
+                .unwrap_or("")
+                .to_owned(),
+        )),
+    }
+}
+
+/// Markdown emphasis and code marks removed, for a notification body.
+fn plain_text(text: &str) -> String {
+    text.replace("**", "").replace('`', "")
+}
+
 /// Run an agent hook: read JSON from stdin, synthesize a notification.
 ///
 /// Args:
@@ -1098,56 +1181,16 @@ async fn run_agent_hook(
     }
 
     // Build a human-friendly title + body depending on event + agent.
-    let agent_label = agent.label();
     persist_agent_hook_session(agent, args, &payload, &event)?;
-    let notification_title_body = match event.as_str() {
-        "Notification" | "notification" => Some((
-            format!("{agent_label} needs you"),
-            hook_str(&payload, &["message", "notification"])
-                .unwrap_or("waiting for input")
-                .to_owned(),
-        )),
-        "Stop" | "stop" | "finished" => {
-            if agent == agent_hooks::AgentKind::Agy && agy_stop_suppresses_notification(&payload) {
-                None
-            } else {
-                Some((
-                    format!("{agent_label} finished"),
-                    hook_str(&payload, &["message", "reason"])
-                        .unwrap_or("task complete")
-                        .to_owned(),
-                ))
-            }
-        }
-        "SessionStart" | "session-start" | "SessionEnd" | "session-end" | "UserPromptSubmit"
-        | "prompt-submit" | "PreToolUse" | "PostToolUse" | "SubagentStop" | "subagent-stop"
-        | "Cleanup" | "cleanup" | "restore-exit" => None,
-        other => Some((
-            format!("{agent_label}: {other}"),
-            hook_str(&payload, &["message", "summary"])
-                .unwrap_or("")
-                .to_owned(),
-        )),
-    };
+    let notification_title_body = agent_hook_notification(agent, &event, &payload);
 
     if let Some((title, body)) = notification_title_body {
-        let subtitle = hook_str(
-            &payload,
-            &["session_id", "conversationId", "sessionId", "sessionID"],
-        )
-        .map(|s| {
-            // Show only a short prefix of the session id to keep sidebar tidy.
-            s.chars().take(8).collect::<String>()
-        })
-        .unwrap_or_default();
-
+        // No session id in the text: it says nothing to the reader and
+        // pushes the message out of the sidebar row.
         let (workspace, surface) = notification_scope(args, env_opt);
 
         let mut params = Map::new();
         params.insert("title".to_string(), Value::String(title));
-        if !subtitle.is_empty() {
-            params.insert("subtitle".to_string(), Value::String(subtitle));
-        }
         if !body.is_empty() {
             params.insert("body".to_string(), Value::String(body));
         }
@@ -1162,7 +1205,175 @@ async fn run_agent_hook(
         }
     }
 
+    if let Some(state) = agent_activity_state(agent, &event, &payload) {
+        let detail = agent_activity_detail(&event, &payload);
+        report_agent_activity(client, agent, args, &payload, state, detail).await;
+    }
+
     Ok(agent_hook_output(agent, &event, &payload))
+}
+
+/// The live state a hook event reports, as the `agent.activity` wire name
+/// ("ended" when the session ends). `None` leaves the terminal's state as it
+/// is. Only Claude Code is mapped so far; other agents keep their
+/// notifications and report no live state.
+fn agent_activity_state(
+    agent: agent_hooks::AgentKind,
+    event: &str,
+    payload: &Value,
+) -> Option<&'static str> {
+    if agent != agent_hooks::AgentKind::Claude {
+        return None;
+    }
+    match event {
+        "Stop" | "stop" if !claude_running_subagents(payload).is_empty() => Some("working"),
+        "SessionStart" | "session-start" | "Stop" | "stop" => Some("idle"),
+        "UserPromptSubmit" | "prompt-submit" | "PreToolUse" | "PostToolUse" | "post-tool-use" => {
+            Some("working")
+        }
+        "SessionEnd" | "session-end" => Some("ended"),
+        "Notification" | "notification" => claude_notification_state(payload),
+        _ => None,
+    }
+}
+
+/// Claude Code sends one Notification hook for several reasons. Newer
+/// versions name it in `notification_type`; older ones only in the message.
+/// A background agent or worker of the session asking for permission or
+/// input needs the user in this terminal too. Others (a background agent
+/// finished, a message Claude chose to send) leave the state as it is.
+fn claude_notification_state(payload: &Value) -> Option<&'static str> {
+    match hook_str(payload, &["notification_type", "notificationType"]) {
+        Some("permission_prompt" | "worker_permission_prompt") => return Some("needs_approval"),
+        Some("elicitation_dialog" | "elicitation_url_dialog" | "agent_needs_input") => {
+            return Some("needs_input")
+        }
+        Some("idle_prompt") => return Some("idle"),
+        Some(_) => return None,
+        None => {}
+    }
+    let message = hook_str(payload, &["message"])?.to_ascii_lowercase();
+    if message.contains("permission") {
+        Some("needs_approval")
+    } else if message.contains("waiting for your input") {
+        Some("idle")
+    } else {
+        None
+    }
+}
+
+/// Tell the app what the agent in this terminal is doing. Best effort: a
+/// hook outside Limux (no terminal id) or an older app that lacks the method
+/// reports nothing, and the agent is never held up or shown an error.
+async fn report_agent_activity(
+    client: &mut Client,
+    agent: agent_hooks::AgentKind,
+    args: &[String],
+    payload: &Value,
+    state: &str,
+    detail: Option<String>,
+) {
+    // An OSC-only hook has no socket to report to.
+    if terminal_notifications::forced() {
+        return;
+    }
+    let (workspace, surface) = notification_scope(args, env_opt);
+    let Some(surface) = surface else {
+        return;
+    };
+    let params = agent_activity_params(agent, payload, state, &surface, unix_millis(), detail);
+    let _ = call_in_workspace_scope(client, workspace, "agent.activity", params).await;
+}
+
+fn agent_activity_params(
+    agent: agent_hooks::AgentKind,
+    payload: &Value,
+    state: &str,
+    surface: &str,
+    at_ms: u64,
+    detail: Option<String>,
+) -> Value {
+    let mut params = json!({
+        "surface_id": surface,
+        "agent": agent.store_name(),
+        "state": state,
+        "at_ms": at_ms,
+    });
+    if let Some(session) = hook_str(
+        payload,
+        &["session_id", "conversationId", "sessionId", "sessionID"],
+    ) {
+        params["session_id"] = Value::String(session.to_owned());
+    }
+    if let Some(detail) = detail {
+        params["detail"] = Value::String(detail);
+    }
+    params
+}
+
+/// What the agent is doing, in one short line for the sidebar: the prompt it
+/// got, the tool it just ran ("Bash: cargo test", "Edit: window.rs"), or what
+/// it asks. `None` keeps the previous line.
+fn agent_activity_detail(event: &str, payload: &Value) -> Option<String> {
+    let text = match event {
+        "UserPromptSubmit" | "prompt-submit" => hook_str(payload, &["prompt"])?.to_owned(),
+        "PreToolUse" | "PostToolUse" | "post-tool-use" => {
+            let tool = hook_str(payload, &["tool_name"])?;
+            let input = payload.get("tool_input");
+            let field = |keys: &[&str]| input.and_then(|input| hook_str(input, keys));
+            let target = match tool {
+                "Bash" => field(&["command"]).map(str::to_owned),
+                "Edit" | "MultiEdit" | "Write" | "Read" | "NotebookEdit" => {
+                    field(&["file_path", "notebook_path"]).map(|path| {
+                        std::path::Path::new(path)
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.to_owned())
+                    })
+                }
+                "Grep" | "Glob" => field(&["pattern"]).map(str::to_owned),
+                "WebFetch" => field(&["url"]).map(str::to_owned),
+                "WebSearch" => field(&["query"]).map(str::to_owned),
+                "Task" | "Agent" => field(&["description"]).map(str::to_owned),
+                _ => None,
+            };
+            match target {
+                Some(target) => format!("{tool}: {target}"),
+                None => tool.to_owned(),
+            }
+        }
+        "Notification" | "notification" => hook_str(payload, &["message"])?.to_owned(),
+        "Stop" | "stop" => match claude_running_subagents(payload).as_slice() {
+            [] => return None,
+            [one] => format!("Waiting on: {one}"),
+            many => format!("Waiting on {} background agents", many.len()),
+        },
+        _ => return None,
+    };
+    Some(one_line(&text, 80))
+}
+
+/// The first non-empty line of `text`, at most `max` characters.
+fn one_line(text: &str, max: usize) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.chars().count() <= max {
+        line.to_owned()
+    } else {
+        let mut cut: String = line.chars().take(max.saturating_sub(1)).collect();
+        cut.push('…');
+        cut
+    }
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn agent_hook_output(agent: agent_hooks::AgentKind, event: &str, payload: &Value) -> Value {
@@ -1779,6 +1990,7 @@ fn install_hook_target(agent: agent_hooks::AgentKind, osc: bool) -> Result<()> {
                 ("UserPromptSubmit", "prompt-submit"),
                 ("Stop", "stop"),
                 ("Notification", "notification"),
+                ("PostToolUse", "post-tool-use"),
                 ("SessionEnd", "session-end"),
             ],
         ),
@@ -1925,7 +2137,7 @@ fn install_json_hooks(
             "hooks": [{
                 "type": "command",
                 "command": hook_command(agent, limux_event, osc)?,
-                "statusMessage": format!("Limux {} session restore", agent.label()),
+                "statusMessage": hook_status_message(agent, limux_event),
                 "timeout": hook_timeout(agent)
             }]
         });
@@ -1936,6 +2148,16 @@ fn install_json_hooks(
     }
 
     write_json_object(path, &root)
+}
+
+/// What the agent shows while the hook runs. The per-tool hook only reports
+/// activity, so it does not claim to restore the session.
+fn hook_status_message(agent: agent_hooks::AgentKind, limux_event: &str) -> String {
+    if limux_event == "post-tool-use" {
+        format!("Limux {} activity", agent.label())
+    } else {
+        format!("Limux {} session restore", agent.label())
+    }
 }
 
 fn hook_timeout(agent: agent_hooks::AgentKind) -> u64 {
@@ -4956,6 +5178,278 @@ mod cli_arg_tests {
         assert_eq!(
             notification_surface_target(&[], env_value),
             Some("tab-stable".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_hook_events_map_to_live_states() {
+        use agent_hooks::AgentKind::{Claude, Codex};
+        let none = json!({});
+        let table = [
+            (
+                "session-start",
+                json!({"hook_event_name": "SessionStart", "source": "startup"}),
+                Some("idle"),
+            ),
+            (
+                "prompt-submit",
+                json!({"hook_event_name": "UserPromptSubmit", "prompt": "fix it"}),
+                Some("working"),
+            ),
+            (
+                "post-tool-use",
+                json!({"hook_event_name": "PostToolUse", "tool_name": "Bash"}),
+                Some("working"),
+            ),
+            (
+                "stop",
+                json!({"hook_event_name": "Stop", "stop_hook_active": false}),
+                Some("idle"),
+            ),
+            (
+                "session-end",
+                json!({"hook_event_name": "SessionEnd", "reason": "exit"}),
+                Some("ended"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "permission_prompt",
+                       "message": "Claude needs your permission to use Bash"}),
+                Some("needs_approval"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "elicitation_dialog",
+                       "message": "Claude has a question"}),
+                Some("needs_input"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "idle_prompt",
+                       "message": "Claude is waiting for your input"}),
+                Some("idle"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "auth_success"}),
+                None,
+            ),
+            // Claude Code 2.1.3xx: background agents and workers.
+            (
+                "notification",
+                json!({"hook_event_name": "Notification",
+                       "notification_type": "worker_permission_prompt",
+                       "message": "builder needs permission for Bash"}),
+                Some("needs_approval"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "agent_needs_input",
+                       "message": "ca842437 needs your input"}),
+                Some("needs_input"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification",
+                       "notification_type": "elicitation_url_dialog"}),
+                Some("needs_input"),
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "agent_completed",
+                       "message": "ca842437 finished"}),
+                None,
+            ),
+            (
+                "notification",
+                json!({"hook_event_name": "Notification", "notification_type": "push_notification",
+                       "message": "Build is green"}),
+                None,
+            ),
+            // Older Claude Code: no type, only the message.
+            (
+                "notification",
+                json!({"message": "Claude needs your permission to use Write"}),
+                Some("needs_approval"),
+            ),
+            (
+                "notification",
+                json!({"message": "Claude is waiting for your input"}),
+                Some("idle"),
+            ),
+            ("notification", json!({"message": "something else"}), None),
+            ("subagent-stop", none.clone(), None),
+        ];
+        for (event, payload, state) in table {
+            assert_eq!(
+                agent_activity_state(Claude, event, &payload),
+                state,
+                "{event} {payload}"
+            );
+        }
+        // Other agents report no live state yet.
+        assert_eq!(agent_activity_state(Codex, "prompt-submit", &none), None);
+        assert_eq!(agent_activity_state(Codex, "stop", &none), None);
+    }
+
+    #[test]
+    fn agent_activity_params_name_the_terminal_session_and_time() {
+        let payload = json!({"session_id": "abc-123", "hook_event_name": "Stop"});
+        let params = agent_activity_params(
+            agent_hooks::AgentKind::Claude,
+            &payload,
+            "idle",
+            "7f0c-tab",
+            42,
+            None,
+        );
+        assert_eq!(
+            params,
+            json!({
+                "surface_id": "7f0c-tab",
+                "agent": "claude",
+                "state": "idle",
+                "at_ms": 42,
+                "session_id": "abc-123",
+            })
+        );
+        let params = agent_activity_params(
+            agent_hooks::AgentKind::Claude,
+            &json!({}),
+            "working",
+            "t",
+            1,
+            Some("Bash: ls".to_string()),
+        );
+        assert!(params.get("session_id").is_none());
+        assert_eq!(params["detail"], "Bash: ls");
+    }
+
+    #[test]
+    fn claude_notifies_once_the_main_agent_is_done_with_what_it_said() {
+        use agent_hooks::AgentKind::Claude;
+        let running = json!({
+            "last_assistant_message": "started",
+            "background_tasks": [
+                {"id": "b1", "type": "shell", "status": "running", "description": "dev server"},
+                {"id": "a1", "type": "subagent", "status": "running", "description": "Reply with pong"},
+            ],
+        });
+        // Subagents still run: no notification, and it keeps working.
+        assert_eq!(agent_hook_notification(Claude, "stop", &running), None);
+        assert_eq!(
+            agent_activity_state(Claude, "stop", &running),
+            Some("working")
+        );
+        assert_eq!(
+            agent_activity_detail("stop", &running).as_deref(),
+            Some("Waiting on: Reply with pong")
+        );
+        // Only a background shell command left (it may never end): done.
+        let done = json!({
+            "last_assistant_message": "\nThe **sidebar** fix is in `window.rs`.\nMore detail.",
+            "background_tasks": [
+                {"id": "b1", "type": "shell", "status": "running", "description": "dev server"},
+            ],
+        });
+        assert_eq!(
+            agent_hook_notification(Claude, "stop", &done),
+            Some((
+                "Claude finished".to_string(),
+                "The sidebar fix is in window.rs.".to_string()
+            ))
+        );
+        assert_eq!(agent_activity_state(Claude, "stop", &done), Some("idle"));
+        assert_eq!(
+            agent_hook_notification(Claude, "stop", &json!({})),
+            Some(("Claude finished".to_string(), "task complete".to_string()))
+        );
+        // A background agent finishing does not notify; one asking does.
+        assert_eq!(
+            agent_hook_notification(
+                Claude,
+                "notification",
+                &json!({"notification_type": "agent_completed", "message": "ca842437 finished"})
+            ),
+            None
+        );
+        assert!(agent_hook_notification(
+            Claude,
+            "notification",
+            &json!({"notification_type": "agent_needs_input", "message": "builder needs your input"})
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn agent_activity_detail_says_what_the_agent_does() {
+        let table = [
+            (
+                "prompt-submit",
+                json!({"prompt": "\n  fix the sidebar tabs\nand more"}),
+                Some("fix the sidebar tabs"),
+            ),
+            (
+                "post-tool-use",
+                json!({"tool_name": "Bash", "tool_input": {"command": "cargo test -p limux\n"}}),
+                Some("Bash: cargo test -p limux"),
+            ),
+            (
+                "post-tool-use",
+                json!({"tool_name": "Edit", "tool_input": {"file_path": "/a/b/window.rs"}}),
+                Some("Edit: window.rs"),
+            ),
+            (
+                "post-tool-use",
+                json!({"tool_name": "Grep", "tool_input": {"pattern": "fn main"}}),
+                Some("Grep: fn main"),
+            ),
+            (
+                "post-tool-use",
+                json!({"tool_name": "TodoWrite"}),
+                Some("TodoWrite"),
+            ),
+            (
+                "notification",
+                json!({"message": "Claude needs your permission to use Bash"}),
+                Some("Claude needs your permission to use Bash"),
+            ),
+            ("stop", json!({"message": "done"}), None),
+            ("post-tool-use", json!({}), None),
+        ];
+        for (event, payload, detail) in table {
+            assert_eq!(
+                agent_activity_detail(event, &payload).as_deref(),
+                detail,
+                "{event} {payload}"
+            );
+        }
+        let long = "x".repeat(200);
+        let detail = agent_activity_detail("prompt-submit", &json!({ "prompt": long })).unwrap();
+        assert_eq!(detail.chars().count(), 80);
+        assert!(detail.ends_with('…'));
+    }
+
+    #[test]
+    fn claude_hook_install_includes_post_tool_use_for_live_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        install_json_hooks(
+            &path,
+            agent_hooks::AgentKind::Claude,
+            false,
+            &[("PostToolUse", "post-tool-use")],
+        )
+        .expect("install hooks");
+        let root: Value =
+            serde_json::from_slice(&fs::read(&path).expect("read settings")).expect("json");
+        assert!(root["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("command")
+            .contains("hooks claude post-tool-use"));
+        assert_eq!(
+            root["hooks"]["PostToolUse"][0]["hooks"][0]["statusMessage"],
+            "Limux Claude activity"
         );
     }
 
