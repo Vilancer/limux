@@ -1415,6 +1415,73 @@ fn pending_panel_works_with_both_bars_hidden() {
     window.close();
 }
 
+// Quitting an agent in a background tab does not leave its shell listed: the
+// agent's exit screen and the prompt coming back are not the shell working.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn quitting_an_agent_does_not_list_its_shell() {
+    let (state, _temp) = pending_test_window("dev.limux.AgentQuitTest");
+    let (ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    let front = pane::active_surface_summary(&pane).unwrap();
+    pane::add_terminal_tab_to_pane(&pane);
+    let back = pane::active_surface_summary(&pane).unwrap();
+    let (_, back_handle) = pane::terminal_tabs_in_pane(&pane)
+        .into_iter()
+        .find(|(tab_id, _)| *tab_id == back.tab_id)
+        .unwrap();
+    pump_for(std::time::Duration::from_millis(3200));
+    report(
+        &state,
+        &ws_id,
+        &back.tab_id,
+        crate::agent_activity::AgentPhase::Idle,
+        "",
+    );
+    // The agent's exit: it prints a little after its session ends.
+    assert!(back_handle
+        .send_text("sleep 2; i=0; while [ $i -lt 3 ]; do echo bye$i; i=$((i+1)); sleep 0.3; done"));
+    assert!(back_handle.send_key("Enter"));
+    agent_activity_ui::handle_agent_activity(
+        &state,
+        &WorkspaceTarget::Handle(ws_id.clone()),
+        &back.tab_id,
+        crate::agent_activity::AgentEvent {
+            tab_id: String::new(),
+            agent: "claude".to_string(),
+            phase: None,
+            session_id: None,
+            at_ms: crate::agent_activity::now_ms(),
+            detail: None,
+        },
+    )
+    .unwrap();
+    activate_desktop_notification_target(
+        &state,
+        &DesktopNotificationTarget {
+            workspace_id: ws_id.clone(),
+            pane_id: Some(front.pane_id),
+            tab_id: Some(front.tab_id.clone()),
+        },
+        None,
+    );
+    // The exit output, then the activity timeout to settle.
+    pump_for(std::time::Duration::from_secs(10));
+    assert!(
+        back_handle
+            .read_viewport_text()
+            .is_some_and(|text| text.contains("bye2")),
+        "it printed after the end; screen: {:?}",
+        back_handle.read_viewport_text()
+    );
+    assert_eq!(state.borrow().agent_activity.phase(&back.tab_id), None);
+    assert!(!pane::workspace_has_unread_tabs(&ws_id), "no finished mark");
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
 // A shell that is slow to start (a system summary, a prompt that fills in
 // its git status) is not listed just for starting, as after a Limux restart.
 #[test]

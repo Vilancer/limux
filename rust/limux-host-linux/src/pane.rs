@@ -3429,6 +3429,23 @@ pub fn terminal_output_states(
     states
 }
 
+/// An agent in this terminal ended and its shell is back: what it prints next
+/// is its start-up, as for a new shell (see `TabActivity::note_input`).
+pub fn note_shell_resumed(tab_id: &str) {
+    let Some(internals) = terminal_tab_owner(tab_id) else {
+        return;
+    };
+    let Ok(tab_state) = internals.tab_state.try_borrow() else {
+        return;
+    };
+    if let Some(entry) = tab_state.tabs.iter().find(|entry| entry.id == tab_id) {
+        entry.activity.note_input(
+            std::time::Instant::now(),
+            crate::terminal::TerminalInput::Start,
+        );
+    }
+}
+
 /// Act as if the user typed into a terminal tab (tests have no real keys).
 #[cfg(test)]
 pub fn simulate_typing_in_tab(tab_id: &str) {

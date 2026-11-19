@@ -278,10 +278,16 @@ pub(super) fn handle_agent_activity(
         .agent_activity
         .phase(&tab_id)
         .is_some_and(AgentPhase::is_waiting);
+    let ended = event.phase.is_none();
     let changed = state.borrow_mut().agent_activity.apply(AgentEvent {
         tab_id: tab_id.clone(),
         ..event
     });
+    if changed && ended {
+        // Its exit screen and the shell's prompt coming back are not the
+        // shell doing something: treat it like a shell starting.
+        pane::note_shell_resumed(&tab_id);
+    }
     if changed {
         refresh_activity(state);
         if !was_waiting {

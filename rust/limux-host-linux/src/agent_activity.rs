@@ -191,7 +191,9 @@ impl ActivityStore {
     /// Follow a terminal that agent hooks do not report on, from its own
     /// output: `working_since` is when its current run of output began, or
     /// `None` while it is quiet. A working terminal stays listed, as idle,
-    /// once it stops. Tabs an agent reports on are left alone.
+    /// once it stops. Tabs an agent reports on are left alone, and so is a
+    /// run of output that began before the tab's entry ended: it is the
+    /// agent's last output (its exit screen), or one the user closed.
     pub fn track_terminal(
         &mut self,
         tab_id: &str,
@@ -205,7 +207,9 @@ impl ActivityStore {
         {
             return TerminalChange::None;
         }
+        let ended = self.removed_at.get(tab_id).copied();
         match (current, working_since) {
+            (None, Some(since)) if ended.is_some_and(|ended| since < ended) => TerminalChange::None,
             (Some(current), Some(_)) if current.phase == AgentPhase::Working => {
                 TerminalChange::None
             }
@@ -810,6 +814,28 @@ mod tests {
         store.apply(event("u", Some(AgentPhase::Working), None, 1_000));
         assert!(!store.keep("u", 2_000), "an agent's state is left alone");
         assert_eq!(store.phase("u"), Some(AgentPhase::Working));
+    }
+
+    #[test]
+    fn an_agent_s_last_output_is_not_the_shell_working() {
+        let mut store = ActivityStore::default();
+        store.apply(event("t", Some(AgentPhase::Working), Some("s"), 1_000));
+        // The user quits the agent: its session ends at 5_000, while the run
+        // of output it drew since 2_000 (and its exit screen) still counts.
+        assert!(store.apply(event("t", None, Some("s"), 5_000)));
+        assert_eq!(
+            store.track_terminal("t", 6_000, Some(2_000)),
+            TerminalChange::None
+        );
+        assert!(
+            store.get("t").is_none(),
+            "not listed for the agent's output"
+        );
+        // Output the shell makes afterwards is its own.
+        assert_eq!(
+            store.track_terminal("t", 20_000, Some(19_000)),
+            TerminalChange::Started
+        );
     }
 
     #[test]
