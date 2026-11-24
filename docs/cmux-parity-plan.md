@@ -19,7 +19,8 @@ Limux has **two control servers**:
    `pane.{list,surfaces,create,focus,swap,break,join,last,resize}`,
    `surface.{list,create,close,focus,send_text,send_key,read_text,health,clear_history}`,
    `browser.{open_split,navigate,url.get,back,forward,reload}`,
-   `tab.action`, `gui_hook.{list,set,clear}`, and `notification.create`.
+   `tab.action`, `gui_hook.{list,set,clear}`, `notification.create`, and
+   `agent.activity` (live agent state from hooks).
    Canonical method metadata, socket `wire_aliases`, and `cli_subcommands` are
    cataloged in `rust/limux-protocol/src/methods.rs`.
 
