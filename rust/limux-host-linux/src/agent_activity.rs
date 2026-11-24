@@ -131,17 +131,32 @@ impl ActivityStore {
                 same_session && self.remove(&event.tab_id, event.at_ms)
             }
             Some(phase) => {
-                // The same phase of the same session keeps its start and line. A
-                // new session (the old one died without an end hook) starts over.
-                let continued = current.filter(|current| {
-                    current.phase == phase
-                        && match (&current.session_id, &event.session_id) {
-                            (Some(current), Some(next)) => current == next,
-                            _ => true,
-                        }
+                // A new session (the old one died without an end hook) starts
+                // over; nothing of the old one carries into it.
+                let same_session =
+                    |current: &&SurfaceActivity| match (&current.session_id, &event.session_id) {
+                        (Some(current), Some(next)) => current == next,
+                        _ => true,
+                    };
+                // A waiting report that says nothing of its own (Claude Code's
+                // generic "needs your permission" notification, which follows
+                // its PermissionRequest) keeps the wait it joins: its sign (a
+                // question stays a question) and its line. A report with a line
+                // of its own (the next PermissionRequest) replaces it.
+                let waiting = current.filter(|current| {
+                    same_session(current)
+                        && current.agent == event.agent
+                        && current.phase.is_waiting()
+                        && phase.is_waiting()
+                        && event.detail.is_none()
                 });
-                let detail = event
-                    .detail
+                let phase = waiting.map_or(phase, |current| current.phase);
+                // The same phase of the same session keeps its start and line.
+                let continued =
+                    current.filter(|current| current.phase == phase && same_session(current));
+                let detail = waiting
+                    .and_then(|current| current.detail.clone())
+                    .or(event.detail)
                     .or_else(|| continued.and_then(|current| current.detail.clone()));
                 let since_ms = continued.map_or(event.at_ms, |current| current.since_ms);
                 let next = SurfaceActivity {
@@ -962,7 +977,8 @@ mod tests {
         // A question stays until its tool ends (a hook says so at once).
         store.apply(event("t", Some(AgentPhase::NeedsInput), Some("s"), 8_000));
         assert!(!store.answered("t", 9_000));
-        // The tool's end still applies after the answer.
+        // Its tool ends (PostToolUse), then the next tool asks for approval.
+        store.apply(event("t", Some(AgentPhase::Working), Some("s"), 9_500));
         store.apply(event(
             "t",
             Some(AgentPhase::NeedsApproval),
@@ -1010,5 +1026,41 @@ mod tests {
         // Closing the tab forgets it, so its id carries nothing over.
         store.retain_tabs(|_| false);
         assert!(store.apply(event("t", Some(AgentPhase::Working), None, 10)));
+    }
+    #[test]
+    fn one_wait_keeps_its_first_sign_and_line() {
+        let with = |phase, at_ms, detail: &str| AgentEvent {
+            detail: Some(detail.to_string()),
+            ..event("t", Some(phase), Some("s"), at_ms)
+        };
+        let mut store = ActivityStore::default();
+        // Claude Code: a question through PermissionRequest, then the generic
+        // permission notification six seconds later.
+        store.apply(with(AgentPhase::Working, 1, "Read: main.rs"));
+        store.apply(with(AgentPhase::NeedsInput, 2, "Which colour?"));
+        store.apply(event("t", Some(AgentPhase::NeedsApproval), Some("s"), 3));
+        let current = store.get("t").unwrap();
+        assert_eq!(current.phase, AgentPhase::NeedsInput);
+        assert_eq!(current.detail.as_deref(), Some("Which colour?"));
+        // An approval keeps the tool it names.
+        store.apply(with(AgentPhase::Working, 4, "AskUserQuestion"));
+        store.apply(with(AgentPhase::NeedsApproval, 5, "Bash: touch hello.txt"));
+        store.apply(event("t", Some(AgentPhase::NeedsApproval), Some("s"), 6));
+        let current = store.get("t").unwrap();
+        assert_eq!(current.phase, AgentPhase::NeedsApproval);
+        assert_eq!(current.detail.as_deref(), Some("Bash: touch hello.txt"));
+        // A second request right after (parallel tools) names its own tool.
+        store.apply(with(AgentPhase::NeedsApproval, 7, "Bash: git push"));
+        assert_eq!(
+            store.get("t").unwrap().detail.as_deref(),
+            Some("Bash: git push")
+        );
+        // Working again ends the wait; the next one starts fresh.
+        store.apply(with(AgentPhase::Working, 8, "Bash: git push"));
+        store.apply(with(AgentPhase::NeedsApproval, 9, "Bash: rm hello.txt"));
+        assert_eq!(
+            store.get("t").unwrap().detail.as_deref(),
+            Some("Bash: rm hello.txt")
+        );
     }
 }

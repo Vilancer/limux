@@ -1,9 +1,9 @@
 # Limux Agent Hooks
 
 These templates wire supported coding-agent hook systems into Limux session
-restore tracking and completion notifications. Default setup covers Codex,
-Claude Code, Gemini CLI, and Antigravity (`agy`); OpenCode remains opt-in via
-`limux hooks setup opencode`.
+restore tracking and the live agent state in the sidebar. Default setup covers
+Codex, Claude Code, Gemini CLI and Antigravity (`agy`); OpenCode remains opt-in
+via `limux hooks setup opencode`, which writes its plugin.
 
 The preferred install path is the CLI installer:
 
@@ -38,35 +38,45 @@ LIMUX_GEMINI_HOOKS_DISABLED=1
 LIMUX_AGY_HOOKS_DISABLED=1
 ```
 
-## Live agent state (Claude Code)
+## Live agent state
 
-Claude Code hooks also report what the agent is doing to the terminal that runs
-it, through the `agent.activity` control method, so the sidebar can show
-working and waiting terminals:
+The hooks also report what the agent is doing to the terminal that runs it,
+through the `agent.activity` control method, so the sidebar can show working
+and waiting terminals. Each agent's hooks are read by its provider in
+`rust/limux-cli/src/agent_providers/`, which turns them into the same states:
 
-| Claude Code event | State |
-|---|---|
-| `SessionStart`, `Stop` | idle (waiting for a prompt) |
-| `UserPromptSubmit`, `PostToolUse` | working |
-| `Notification` with `permission_prompt` | needs approval |
-| `Notification` with `elicitation_dialog` | needs input |
-| `Notification` with `idle_prompt` | idle |
-| `SessionEnd` | ended |
+| State | Claude Code | Codex | Gemini CLI | OpenCode (plugin) |
+|---|---|---|---|---|
+| working | `UserPromptSubmit`, `PostToolUse` | `UserPromptSubmit`, `PostToolUse` | `BeforeAgent`, `AfterTool` | `chat.message`, `session.status` busy, `tool.execute.before`, a reply to a permission or question |
+| needs approval | `PermissionRequest`, `Notification` `permission_prompt` | `PermissionRequest` | `Notification` `ToolPermission` | `permission.asked` |
+| needs input | `PermissionRequest` for `AskUserQuestion`, `Notification` `elicitation_dialog` | | | `question.asked` |
+| idle | `SessionStart`, `Stop`, `Notification` `idle_prompt` | `SessionStart`, `Stop`, `Interrupt` | `SessionStart`, `AfterAgent` | `session.created`, `session.idle` |
+| ended | `SessionEnd` | `SessionEnd` | `SessionEnd` | `session.deleted` |
 
 Each report also carries one line of what the agent is doing, shown under its
 terminal in the sidebar: the first line of the prompt, the tool it just ran
-(`Bash: cargo test`, `Edit: window.rs`), or the notification message. It stays
-on your machine; the hook only sends it to the local Limux socket.
+(`Bash: cargo test`, `Edit: window.rs`), the question, or what it asks to run.
+It stays on your machine; the hook only sends it to the local Limux socket.
+When a turn ends, the notification says what the agent last said.
 
-`PostToolUse` is new: it tells Limux that a tool ran after you approved it.
-Hooks installed by an older Limux lack it, so a request you approved keeps
-showing as waiting until Claude's turn ends. Run `limux hooks setup claude`
-again to add it, once per Claude config directory if you use several
-(`CLAUDE_CONFIG_DIR=<dir> limux hooks setup claude`), and restart running
-Claude Code sessions. The report is best effort: outside a
-Limux terminal, over SSH or with `LIMUX_NOTIFY_OSC=1` nothing is sent, and the
-agent is never held up. Codex, Gemini and OpenCode keep their notifications and
-report no live state yet.
+Claude Code's `PermissionRequest` fires as the dialog opens; its
+`permission_prompt` Notification comes about six seconds later, or never when
+you answer sooner. A question (AskUserQuestion) uses the same dialog, so it is
+told apart by its tool. Codex has no Notification hook: it notifies on
+`PermissionRequest` and `Stop`. OpenCode's plugin skips the events of a
+subagent's child session, whose end is not the end of your session.
+
+Hooks installed by an older Limux lack the newer events, so approvals show
+late and a request you approved keeps showing as waiting until the turn ends.
+Run `limux hooks setup <agent>` again to add them (for Claude, once per config
+directory if you use several: `CLAUDE_CONFIG_DIR=<dir> limux hooks setup
+claude`) and restart running sessions. Codex then asks you to trust the new
+hooks once (`/hooks`, `t`).
+
+The report is best effort: outside a Limux terminal nothing is sent, over SSH
+or with `LIMUX_NOTIFY_OSC=1` only the notification goes back through the
+terminal, and the agent is never held up. Another agent can be added with a
+provider of its own: the hooks it installs, and how one hook call reads.
 
 ## Snapshotting already-running agent sessions
 

@@ -1,52 +1,26 @@
 {
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ \"${LIMUX_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks claude session-start || echo '{\"continue\":true,\"suppressOutput\":false}'",
-            "statusMessage": "Limux Claude session restore",
-            "timeout": 5
-          }
-        ],
-        "matcher": "*"
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ \"${LIMUX_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks claude prompt-submit || echo '{\"continue\":true,\"suppressOutput\":false}'",
-            "statusMessage": "Limux Claude session restore",
-            "timeout": 5
-          }
-        ],
-        "matcher": "*"
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ \"${LIMUX_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks claude stop || echo '{\"continue\":true,\"suppressOutput\":false}'",
-            "statusMessage": "Limux Claude session restore",
-            "timeout": 5
-          }
-        ],
-        "matcher": "*"
-      }
-    ],
     "Notification": [
       {
         "hooks": [
           {
-            "type": "command",
             "command": "[ \"${LIMUX_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks claude notification || echo '{\"continue\":true,\"suppressOutput\":false}'",
             "statusMessage": "Limux Claude session restore",
-            "timeout": 5
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "command": "[ \"${LIMUX_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks claude permission-request || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "statusMessage": "Limux Claude activity",
+            "timeout": 5,
+            "type": "command"
           }
         ],
         "matcher": "*"
@@ -56,10 +30,10 @@
       {
         "hooks": [
           {
-            "type": "command",
             "command": "[ \"${LIMUX_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks claude post-tool-use || echo '{\"continue\":true,\"suppressOutput\":false}'",
             "statusMessage": "Limux Claude activity",
-            "timeout": 5
+            "timeout": 5,
+            "type": "command"
           }
         ],
         "matcher": "*"
@@ -69,10 +43,49 @@
       {
         "hooks": [
           {
-            "type": "command",
             "command": "[ \"${LIMUX_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks claude session-end || echo '{\"continue\":true,\"suppressOutput\":false}'",
             "statusMessage": "Limux Claude session restore",
-            "timeout": 5
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "[ \"${LIMUX_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks claude session-start || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "statusMessage": "Limux Claude session restore",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "[ \"${LIMUX_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks claude stop || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "statusMessage": "Limux Claude session restore",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "[ \"${LIMUX_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks claude prompt-submit || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "statusMessage": "Limux Claude session restore",
+            "timeout": 5,
+            "type": "command"
           }
         ],
         "matcher": "*"
