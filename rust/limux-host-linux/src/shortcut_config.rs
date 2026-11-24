@@ -49,6 +49,8 @@ pub enum ShortcutId {
     RecentWorkspace,
     NextUnreadTerminal,
     PrevUnreadTerminal,
+    NextWorkingTerminal,
+    PendingPanel,
     OpenBrowserInSplit,
     BrowserFocusLocation,
     BrowserBack,
@@ -104,6 +106,8 @@ pub enum ShortcutCommand {
     RecentWorkspace,
     NextUnreadTerminal,
     PrevUnreadTerminal,
+    NextWorkingTerminal,
+    PendingPanel,
     OpenBrowserInSplit,
     BrowserFocusLocation,
     BrowserBack,
@@ -388,7 +392,7 @@ struct ShortcutConfigFile {
     shortcuts: HashMap<String, serde_json::Value>,
 }
 
-const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 52] = [
+const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 54] = [
     ShortcutDefinition {
         id: ShortcutId::NewWorkspace,
         config_key: "new_workspace",
@@ -735,7 +739,7 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 52] = [
         config_key: "recent_workspace",
         action_name: "win.recent-workspace",
         default_accel: "<Ctrl><Alt>o",
-        label: "Switch to Most Recent Workspace",
+        label: "Back to Previous Terminal",
         registers_gtk_accel: false,
         command: ShortcutCommand::RecentWorkspace,
         scope: ShortcutScope::Window,
@@ -760,6 +764,28 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 52] = [
         label: "Previous Unread Terminal",
         registers_gtk_accel: false,
         command: ShortcutCommand::PrevUnreadTerminal,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::NextWorkingTerminal,
+        config_key: "next_working_terminal",
+        action_name: "win.next-working-terminal",
+        default_accel: "<Ctrl><Alt>j",
+        label: "Next Working Terminal",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::NextWorkingTerminal,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
+        id: ShortcutId::PendingPanel,
+        config_key: "pending_panel",
+        action_name: "win.pending-panel",
+        default_accel: "<Ctrl><Alt>p",
+        label: "Show Pending Terminals",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::PendingPanel,
         scope: ShortcutScope::Window,
         editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
@@ -1881,7 +1907,7 @@ mod tests {
 
     #[test]
     fn definitions_cover_current_host_shortcuts() {
-        assert_eq!(definitions().len(), 52);
+        assert_eq!(definitions().len(), 54);
     }
 
     #[test]

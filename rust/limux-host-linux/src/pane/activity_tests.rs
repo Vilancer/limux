@@ -308,6 +308,40 @@ fn real_pty_output_drives_tab_activity_lifecycle() {
         "fresh background output before notification",
         || first_activity.widget().is_visible(),
     );
+    // An agent's own sign says more than recent output: one spinner, not two.
+    let show_working = |detail: Option<&str>| {
+        super::sync_tab_agent_signs(|tab_id| {
+            (tab_id == first_id).then(|| super::TabAgentSign {
+                waiting: false,
+                working: true,
+                tooltip: "Agent working".to_string(),
+                fallback_title: None,
+                detail: detail.map(str::to_string),
+            })
+        });
+    };
+    show_working(None);
+    assert!(
+        !first_activity.widget().is_visible(),
+        "the agent's working spinner replaces the output spinner"
+    );
+    // What it does changes with every tool; the tab keeps one width.
+    let tab_width = |detail: &str| {
+        show_working(Some(detail));
+        let internals = find_pane_internals(&source_widget).expect("registered pane");
+        let tabs = internals.tab_state.borrow();
+        let entry = tabs.tabs.iter().find(|entry| entry.id == first_id).unwrap();
+        entry.tab_button.measure(gtk::Orientation::Horizontal, -1).1
+    };
+    let short = tab_width("Poll");
+    let long = tab_width("Bash: cargo test --workspace -- --test-threads=1");
+    assert!(short > 0);
+    assert_eq!(short, long, "the tab width does not follow the detail text");
+    super::sync_tab_agent_signs(|_| None);
+    assert!(
+        first_activity.widget().is_visible(),
+        "the output spinner comes back once the agent sign clears"
+    );
     let source_pane_id = find_pane_internals(&source_widget)
         .expect("registered source pane")
         .pane_id;
@@ -359,8 +393,18 @@ fn real_pty_output_drives_tab_activity_lifecycle() {
     wait_for(
         &context,
         Duration::from_secs(3),
-        "visiting the unread tab to map it and clear its blue dot",
-        || first_content.is_mapped() && !tab_unread_dot_is_visible(&source_widget, &first_id),
+        "visiting the unread tab to map it",
+        || first_content.is_mapped(),
+    );
+    pump_for(&context, Duration::from_millis(200));
+    assert!(
+        tab_unread_dot_is_visible(&source_widget, &first_id),
+        "a visit alone keeps the blue dot"
+    );
+    first_handle.simulate_typing();
+    assert!(
+        !tab_unread_dot_is_visible(&source_widget, &first_id),
+        "typing into the tab reads it"
     );
     assert!(
         !first_activity.widget().is_visible(),

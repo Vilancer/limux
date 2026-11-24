@@ -243,6 +243,7 @@ fn an_unscoped_surface_hint_is_resolved_once_across_workspaces() {
         id: id.to_string(),
         custom_name: None,
         pinned: false,
+        untracked: false,
         content: TabContentState::Keybinds {},
     };
     // `x` is a moved terminal; `0:x` and `5:x` are restored tab ids, so the hints

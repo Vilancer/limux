@@ -138,6 +138,15 @@ impl UnreadColor {
         }
     }
 
+    /// The colour of "waiting for you" (an agent asks for approval or input),
+    /// kept apart from the unread colour so the two never look alike.
+    pub fn waiting_css_color(self) -> &'static str {
+        match self {
+            Self::Rose => "#f59e0b",
+            _ => "#fb7185",
+        }
+    }
+
     pub fn css_color(self) -> &'static str {
         match self {
             Self::Amber => "#f59e0b",

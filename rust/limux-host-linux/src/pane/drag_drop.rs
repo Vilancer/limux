@@ -338,12 +338,6 @@ pub(super) fn transfer_tab_between_panes(
             &source.tab_state,
             &next_active,
         );
-        clear_tab_unread_if_visible(
-            &source.tab_state,
-            &next_active,
-            &source.pane_outer.clone().upcast(),
-            &source.callbacks,
-        );
     }
 
     // The tab belongs to the target from now on, so closing either pane
@@ -406,15 +400,7 @@ pub(super) fn transfer_tab_between_panes(
         &target.tab_state,
         &moved_tab_id,
     );
-    let target_widget = target.pane_outer.clone().upcast();
-    if (target.callbacks.is_pane_visible)(&target_widget) {
-        clear_tab_unread_if_visible(
-            &target.tab_state,
-            &moved_tab_id,
-            &target_widget,
-            &target.callbacks,
-        );
-    } else if moved_was_unread {
+    if moved_was_unread {
         (target.callbacks.on_unread_changed)();
     }
     (target.callbacks.on_state_changed)();

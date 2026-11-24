@@ -436,6 +436,10 @@ for regression in \
   window::pane_close_tests::localized_split_and_remove_keep_sibling_gl_areas_realized \
   window::pane_close_tests::tab_unread_changes_preserve_independent_workspace_notifications \
   window::pane_close_tests::an_exit_driven_through_the_control_socket_closes_its_tab_unwatched \
+  window::pane_close_tests::the_counter_shows_working_beside_unread \
+  window::pane_close_tests::bringing_active_projects_up_reorders_and_undoes \
+  window::pane_close_tests::an_untracked_terminal_is_not_listed_for_its_output \
+  window::pane_close_tests::kept_terminals_come_back_quiet_after_a_restart \
   window::pane_close_tests::a_failed_exit_driven_through_the_control_socket_is_held \
   window::pane_close_tests::next_unread_terminal_reads_a_tab_a_zoom_hid \
   window::pane_close_tests::closing_inactive_workspace_preserves_active_manual_unread \

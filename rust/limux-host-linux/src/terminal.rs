@@ -567,10 +567,17 @@ impl TerminalHandle {
             return false;
         };
 
+        note_input(&self.callbacks, TerminalInput::Sent);
         unsafe {
             ghostty_surface_text(surface, text.as_ptr() as *const c_char, text.len());
         }
         true
+    }
+
+    /// What a key press tells the owner, without a real key event.
+    #[cfg(test)]
+    pub fn simulate_typing(&self) {
+        note_input(&self.callbacks, TerminalInput::Typed);
     }
 
     pub fn send_key(&self, key: &str) -> bool {
@@ -584,6 +591,14 @@ impl TerminalHandle {
         let Some((keyval, modifier)) = gtk::accelerator_parse(binding.to_config_accel()) else {
             return false;
         };
+        note_input(
+            &self.callbacks,
+            if is_answer_key(keyval) {
+                TerminalInput::SentAnswer
+            } else {
+                TerminalInput::Sent
+            },
+        );
 
         // A key needs BOTH halves, and supplying only one drops it silently.
         //
@@ -2026,6 +2041,8 @@ pub struct ChildExit {
 
 pub struct TerminalCallbacks {
     pub on_output_activity: Rc<dyn Fn(Instant)>,
+    /// Input reached the terminal at this time, or its shell started.
+    pub on_input: Rc<dyn Fn(Instant, TerminalInput)>,
     pub on_title_changed: Box<TitleChangedCallback>,
     pub on_pwd_changed: Box<PwdChangedCallback>,
     pub on_desktop_notification: Box<DesktopNotificationCallback>,
@@ -2044,10 +2061,88 @@ pub struct TerminalCallbacks {
     pub copy_selection_to_clipboard: Box<dyn Fn() -> bool>,
 }
 
+/// What reached a terminal (see [`TerminalCallbacks::on_input`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalInput {
+    /// Its surface was created, so its shell is starting.
+    Start,
+    /// The user typed or pasted.
+    Typed,
+    /// Text or a key sent by Limux (the control socket, an autostart
+    /// command, a drop).
+    Sent,
+    /// A resize or a focus change: programs redraw for it.
+    Redraw,
+    /// `Typed`, with a key that answers a yes/no dialog (Enter or a digit).
+    TypedAnswer,
+    /// `Sent`, with such a key.
+    SentAnswer,
+}
+
+impl TerminalInput {
+    /// The user typed or pasted.
+    pub fn is_typed(self) -> bool {
+        matches!(self, Self::Typed | Self::TypedAnswer)
+    }
+
+    /// Someone gave the terminal something to do, typed or sent.
+    pub fn is_command(self) -> bool {
+        matches!(
+            self,
+            Self::Typed | Self::TypedAnswer | Self::Sent | Self::SentAnswer
+        )
+    }
+
+    /// A key that answers a yes/no dialog.
+    pub fn is_answer(self) -> bool {
+        matches!(self, Self::TypedAnswer | Self::SentAnswer)
+    }
+}
+
+/// Keys that answer an agent's permission dialog: Enter takes the selected
+/// choice, a digit picks one.
+fn is_answer_key(keyval: gtk::gdk::Key) -> bool {
+    use gtk::gdk::Key;
+    matches!(keyval, Key::Return | Key::KP_Enter | Key::ISO_Enter)
+        || keyval.to_unicode().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// Tell the owner that input reached the terminal (see
+/// [`TerminalCallbacks::on_input`]).
+pub(super) fn note_input(callbacks: &Rc<RefCell<TerminalCallbacks>>, input: TerminalInput) {
+    let on_input = callbacks.borrow().on_input.clone();
+    on_input(Instant::now(), input);
+}
+
+/// Keys that only modify another key, such as the Ctrl of a Limux shortcut.
+fn is_modifier_key(keyval: gtk::gdk::Key) -> bool {
+    use gtk::gdk::Key;
+    matches!(
+        keyval,
+        Key::Shift_L
+            | Key::Shift_R
+            | Key::Control_L
+            | Key::Control_R
+            | Key::Alt_L
+            | Key::Alt_R
+            | Key::Meta_L
+            | Key::Meta_R
+            | Key::Super_L
+            | Key::Super_R
+            | Key::Hyper_L
+            | Key::Hyper_R
+            | Key::ISO_Level3_Shift
+            | Key::ISO_Level5_Shift
+            | Key::Caps_Lock
+            | Key::Num_Lock
+    )
+}
+
 impl TerminalCallbacks {
     pub(crate) fn disconnected() -> Self {
         Self {
             on_output_activity: Rc::new(|_| {}),
+            on_input: Rc::new(|_, _| {}),
             image_paste_destination: Box::new(|| Ok(image_paste::ImagePasteDestination::Local)),
             on_title_changed: Box::new(|_| {}),
             on_pwd_changed: Box::new(|_| {}),
@@ -2705,6 +2800,11 @@ pub fn create_terminal(
             if flatpak::enabled() {
                 flatpak::surface_created();
             }
+            // The shell starts now (a restored background tab only when first
+            // shown): its start-up output is not activity of its own.
+            {
+                note_input(&callbacks, TerminalInput::Start);
+            }
             let surface_key = surface as usize;
             let surface_identity = register_surface_identity(surface_key);
             output_activity.bind(surface_identity);
@@ -2859,9 +2959,12 @@ pub fn create_terminal(
         let surface_cell = surface_cell.clone();
         let gl_for_resize = gl_area.clone();
         let had_focus = had_focus.clone();
+        let callbacks = callbacks.clone();
         let pane_ime_resize = pane_ime.clone();
         let handler = gl_area.connect_resize(move |gl_area, width, height| {
             pane_ime_resize.invalidate_cursor_location();
+            // Programs redraw for the new size.
+            note_input(&callbacks, TerminalInput::Redraw);
             if let Some(surface) = *surface_cell.borrow() {
                 let w = width as u32;
                 let h = height as u32;
@@ -2911,12 +3014,23 @@ pub fn create_terminal(
         let motion_for_key_press = motion_coalescer.clone();
         let motion_for_key_release = motion_coalescer.clone();
         let key_controller = gtk::EventControllerKey::new();
+        let callbacks_for_keys = callbacks.clone();
         key_controller.connect_key_pressed(move |ctrl, keyval, keycode, modifier| {
             if let Some(surface) = *sc_press.borrow() {
                 // Flush queued pointer motion before key handling so Ctrl+link
                 // modifiers and mouse-hide-while-typing cannot be clobbered by
                 // a pre-keypress tick callback.
                 motion_for_key_press.flush_to_surface(surface);
+                note_input(
+                    &callbacks_for_keys,
+                    if is_modifier_key(keyval) {
+                        TerminalInput::Redraw
+                    } else if is_answer_key(keyval) {
+                        TerminalInput::TypedAnswer
+                    } else {
+                        TerminalInput::Typed
+                    },
+                );
                 let current_event = ctrl
                     .current_event()
                     .and_then(|event| event.downcast::<gtk::gdk::KeyEvent>().ok());
@@ -3232,7 +3346,11 @@ pub fn create_terminal(
         let precision_scroll_focus_leave = precision_scroll.clone();
         let focus_ctrl = gtk::EventControllerFocus::new();
         let sc = surface_cell.clone();
+        let callbacks_enter = callbacks.clone();
+        let callbacks_leave = callbacks.clone();
         focus_ctrl.connect_enter(move |_| {
+            // Programs that track focus redraw on it.
+            note_input(&callbacks_enter, TerminalInput::Redraw);
             had_focus_enter.set(true);
             pane_ime_enter.invalidate_cursor_location();
             im_context_enter.focus_in();
@@ -3242,6 +3360,7 @@ pub fn create_terminal(
             }
         });
         focus_ctrl.connect_leave(move |_| {
+            note_input(&callbacks_leave, TerminalInput::Redraw);
             had_focus_leave.set(false);
             precision_scroll_focus_leave.set(false);
             pane_ime_leave.invalidate_cursor_location();
