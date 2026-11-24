@@ -52,6 +52,19 @@
         "matcher": "*"
       }
     ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${LIMUX_CLAUDE_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks claude post-tool-use || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "statusMessage": "Limux Claude activity",
+            "timeout": 5
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [
