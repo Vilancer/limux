@@ -99,6 +99,7 @@ fn overflowing_tabs_bound_terminal_geometry_and_reveal_selection() {
                 pinned: false,
                 unread: false,
                 manual_unread: false,
+                untracked: false,
                 kind: TabKind::Keybinds,
             });
             activate_tab(

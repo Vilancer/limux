@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -30,8 +30,12 @@ use crate::split_tree::{self, SplitTreeContainer};
 use crate::workspace_color::{self, WorkspaceColor};
 use crate::workspace_group::{Placement, RowRef, SidebarLayout};
 
+mod agent_activity_ui;
 mod gui_hooks;
+mod hooks_card;
+mod kept_terminals;
 mod navigation_notifications;
+mod pending_panel;
 mod session_persistence;
 mod sidebar_groups;
 pub(crate) use navigation_notifications::find_gl_area;
@@ -69,7 +73,16 @@ struct Workspace {
     /// True when the user explicitly marked this workspace unread via the context menu.
     manual_unread: bool,
     /// Cached `(unread, notify_label_visible)` applied to sidebar and top-bar widgets.
-    unread_visual: Cell<Option<(bool, bool)>>,
+    /// What the row's unread and activity signs last showed: (signal,
+    /// unread, message shown, counts), so an unchanged repaint is skipped.
+    unread_visual: Cell<
+        Option<(
+            crate::agent_activity::ProjectSignal,
+            bool,
+            bool,
+            crate::agent_activity::ActivityCounts,
+        )>,
+    >,
     /// Background colour of the sidebar row, if the user picked one.
     color: Option<WorkspaceColor>,
     /// Last known working directory from the terminal (via OSC 7).
@@ -84,6 +97,12 @@ struct Workspace {
     indicator_button: gtk::Button,
     /// The unread dot inside the indicator pill.
     indicator_unread_dot: gtk::Label,
+    /// Chevron that opens the project's session list.
+    sessions_toggle: gtk::Button,
+    /// The project's session rows, one per terminal.
+    sessions_box: gtk::Box,
+    /// The row's sign spinner, preview line and age.
+    row_extras: agent_activity_ui::RowExtras,
 }
 
 #[derive(Clone)]
@@ -105,6 +124,8 @@ pub(crate) struct AppState {
     sidebar_toggle: Option<gtk::ToggleButton>,
     top_bar_new_ws_btn_ref: Option<gtk::Button>,
     top_bar_open_folder_btn_ref: Option<gtk::Button>,
+    /// The pending counter; placed next to the folder button.
+    top_bar_pending_btn: Option<gtk::Button>,
     top_bar_settings_btn: Option<gtk::Button>,
     sidebar_header: gtk::Box,
     sidebar_header_handle: gtk::WindowHandle,
@@ -121,6 +142,8 @@ pub(crate) struct AppState {
     /// Header rows of the groups in `sidebar`, by group id.
     group_headers: HashMap<String, sidebar_groups::GroupHeader>,
     last_focused_surface: Option<FocusRestoreTarget>,
+    /// The terminal focused before `last_focused_surface`, for going back.
+    previous_surface: Option<FocusRestoreTarget>,
     pending_focus_restore: Option<FocusRestoreTarget>,
     last_workspace_id: Option<String>,
     current_pane_by_workspace: HashMap<String, u32>,
@@ -150,6 +173,35 @@ pub(crate) struct AppState {
     group_dragging: Option<String>,
     suppress_sidebar_row_selected: bool,
     desktop_notification_routes: HashMap<u32, DesktopNotificationRoute>,
+    /// Live agent state per terminal tab, from `agent.activity`.
+    agent_activity: crate::agent_activity::ActivityStore,
+    /// Projects whose session list is open.
+    expanded_sessions: HashSet<String>,
+    /// Session rows as last drawn, per project, to skip unchanged rebuilds.
+    session_views: HashMap<String, Vec<agent_activity_ui::SessionRowView>>,
+    /// Bumped on every project switch; a pending unread clear checks it.
+    /// When each terminal tab was last on screen in an active window (Unix ms).
+    tab_seen_ms: HashMap<String, u64>,
+    /// Projects shown as one-line previews under a collapsed group.
+    preview_rows: HashSet<String>,
+    /// With both bars hidden: the project's name before its tabs.
+    fullscreen_project: gtk::Label,
+    /// The pending panel while it is open.
+    pending_open: Option<pending_panel::OpenPanel>,
+    /// The sidebar order before and after "Bring active projects up", while
+    /// its Undo is offered.
+    sidebar_undo: Option<sidebar_groups::BringUpUndo>,
+    /// Counts Undo notices, so an older notice's timer leaves a newer alone.
+    undo_generation: u64,
+    /// The kept terminals this window last wrote, to skip unchanged saves
+    /// and to know its own entries in the shared file.
+    kept_written: Option<Vec<kept_terminals::KeptTerminal>>,
+    /// The notice offering that Undo, at the bottom of the sidebar.
+    undo_notice: gtk::Box,
+    /// Latest message and its time per terminal tab, for the pending panel.
+    tab_notes: HashMap<String, (String, u64)>,
+    /// The same for projects marked unread without a terminal target.
+    workspace_notes: HashMap<String, (String, u64)>,
     desktop_notification_route_order: VecDeque<u32>,
     desktop_notification_proxy: Option<gio::DBusProxy>,
     _theme_portal_signal: Option<gio::SignalSubscription>,
@@ -1500,7 +1552,7 @@ const BASE_CSS: &str = r#"
     outline: none;
 }
 .limux-sidebar-row-box {
-    padding: 8px 10px 8px 10px;
+    padding: 5px 8px 5px 4px;
     border-radius: 8px;
     margin: 1px 6px;
 }
@@ -1589,18 +1641,16 @@ const BASE_CSS: &str = r#"
     font-size: 11px;
 }
 .limux-notify-msg-unread {
-    color: alpha(#f59e0b, 0.9);
-    font-size: 11px;
+    color: alpha(@window_fg_color, 0.74);
+    font-size: 12px;
 }
+/* Finished keeps its sign and a bold name; the loud card is for waiting. */
 .limux-sidebar-row-unread {
-    background-color: alpha(#f59e0b, 0.14);
-    border-left: 3px solid #f59e0b;
     border-radius: 8px;
-    margin-left: 3px;
 }
-.limux-sidebar-list row:selected .limux-sidebar-row-box.limux-sidebar-row-unread {
-    background: alpha(#f59e0b, 0.18);
-    border-left: 3px solid #f59e0b;
+.limux-sidebar-row-waiting .limux-ws-name {
+    color: @window_fg_color;
+    font-weight: 700;
 }
 .limux-sidebar-row-unread .limux-ws-name {
     color: @window_fg_color;
@@ -1708,7 +1758,7 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
         ""
     };
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         build_window_css(background_opacity),
         pane::PANE_CSS,
         crate::terminal::CLIPBOARD_TOAST_CSS,
@@ -1718,6 +1768,9 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
         ssd_css,
         workspace_color::workspace_color_css(),
         sidebar_groups::workspace_group_css(),
+        agent_activity_ui::agent_activity_css(),
+        pending_panel::pending_panel_css(),
+        hooks_card::hooks_card_css(),
     )
 }
 
@@ -1882,6 +1935,10 @@ pub fn build_window(app: &adw::Application) {
     top_bar_content.append(&open_folder);
     top_bar_open_folder_btn = open_folder;
 
+    // Pending counter: hidden until a terminal waits or is unread.
+    let top_bar_pending_btn = pending_panel::build_counter();
+    top_bar_content.append(&top_bar_pending_btn);
+
     // Workspace indicator pills (takes the rest of the space)
     top_bar_content.append(&indicator_scroll);
 
@@ -2032,6 +2089,11 @@ pub fn build_window(app: &adw::Application) {
     sidebar.append(&sidebar_drag_area);
     sidebar.append(&sidebar_header_handle);
     sidebar.append(&sidebar_scroll);
+    // Explains a sidebar without agent signs: Claude Code lacks the hooks.
+    sidebar.append(&hooks_card::build());
+    // Offers Undo after "Bring active projects up".
+    let (undo_notice, undo_button) = sidebar_groups::build_undo_notice();
+    sidebar.append(&undo_notice);
     let ssh_button = gtk::Button::with_label("Connect via SSH…");
     ssh_button.set_tooltip_text(Some("Open an SSH connection in a new workspace"));
     sidebar.append(&ssh_button);
@@ -2054,6 +2116,7 @@ pub fn build_window(app: &adw::Application) {
         sidebar_toggle: Some(sidebar_toggle),
         top_bar_new_ws_btn_ref: Some(top_bar_new_ws_btn.clone()),
         top_bar_open_folder_btn_ref: Some(top_bar_open_folder_btn.clone()),
+        top_bar_pending_btn: Some(top_bar_pending_btn.clone()),
         top_bar_settings_btn: Some(top_bar_settings_btn.clone()),
         sidebar_header: sidebar_header.clone(),
         sidebar_header_handle: sidebar_header_handle.clone(),
@@ -2067,6 +2130,7 @@ pub fn build_window(app: &adw::Application) {
         sidebar: SidebarLayout::default(),
         group_headers: HashMap::new(),
         last_focused_surface: None,
+        previous_surface: None,
         pending_focus_restore: None,
         last_workspace_id: None,
         current_pane_by_workspace: HashMap::new(),
@@ -2096,6 +2160,19 @@ pub fn build_window(app: &adw::Application) {
         group_dragging: None,
         suppress_sidebar_row_selected: false,
         desktop_notification_routes: HashMap::new(),
+        agent_activity: Default::default(),
+        expanded_sessions: HashSet::new(),
+        session_views: HashMap::new(),
+        tab_seen_ms: HashMap::new(),
+        preview_rows: HashSet::new(),
+        fullscreen_project: agent_activity_ui::build_fullscreen_project(),
+        pending_open: None,
+        sidebar_undo: None,
+        undo_generation: 0,
+        kept_written: None,
+        undo_notice: undo_notice.clone(),
+        tab_notes: HashMap::new(),
+        workspace_notes: HashMap::new(),
         desktop_notification_route_order: VecDeque::new(),
         desktop_notification_proxy: None,
         _theme_portal_signal: None,
@@ -2105,6 +2182,7 @@ pub fn build_window(app: &adw::Application) {
         _desktop_notification_action_signal: None,
         _desktop_notification_closed_signal: None,
     }));
+    sidebar_groups::connect_undo_notice(&state, &undo_button);
     CONTROL_STATE.with(|slot| {
         *slot.borrow_mut() = Some(state.clone());
     });
@@ -2147,13 +2225,6 @@ pub fn build_window(app: &adw::Application) {
                 return;
             }
             restore_pending_focus_if_idle(&state, window.upcast_ref());
-            let workspace_id = state
-                .borrow()
-                .active_workspace()
-                .map(|workspace| workspace.id.clone());
-            if let Some(workspace_id) = workspace_id {
-                clear_visible_tab_unread_on_window_focus(&state, &workspace_id);
-            }
         });
     }
 
@@ -2272,6 +2343,9 @@ pub fn build_window(app: &adw::Application) {
             }
         });
     }
+
+    agent_activity_ui::install_activity_timer(&state);
+    pending_panel::install(&state, &top_bar_pending_btn);
 
     {
         let state = state.clone();
@@ -2922,7 +2996,9 @@ fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) -> bool {
             true
         }
         ShortcutCommand::RecentWorkspace => {
-            switch_to_recent_workspace(state);
+            if !jump_to_previous_terminal(state) {
+                switch_to_recent_workspace(state);
+            }
             true
         }
         ShortcutCommand::NextUnreadTerminal => {
@@ -2931,6 +3007,14 @@ fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) -> bool {
         }
         ShortcutCommand::PrevUnreadTerminal => {
             cycle_unread_terminal(state, false);
+            true
+        }
+        ShortcutCommand::NextWorkingTerminal => {
+            cycle_working_terminal_anywhere(state);
+            true
+        }
+        ShortcutCommand::PendingPanel => {
+            pending_panel::toggle(state);
             true
         }
         ShortcutCommand::OpenBrowserInSplit
@@ -3698,6 +3782,7 @@ struct TopBarWidgets {
     settings: gtk::Button,
     new_ws: gtk::Button,
     open_folder: gtk::Button,
+    pending: gtk::Button,
     minimize: gtk::Button,
     maximize: gtk::Button,
     close: gtk::Button,
@@ -3727,6 +3812,7 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
             Some(settings),
             Some(new_ws),
             Some(open_folder),
+            Some(pending),
             Some(minimize),
             Some(maximize),
             Some(close),
@@ -3737,6 +3823,7 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
             s.top_bar_settings_btn.clone(),
             s.top_bar_new_ws_btn_ref.clone(),
             s.top_bar_open_folder_btn_ref.clone(),
+            s.top_bar_pending_btn.clone(),
             s.top_bar_minimize_btn.clone(),
             s.top_bar_maximize_btn.clone(),
             s.top_bar_close_btn.clone(),
@@ -3751,6 +3838,7 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
             settings,
             new_ws,
             open_folder,
+            pending,
             minimize,
             maximize,
             close,
@@ -3827,6 +3915,12 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
     detach(&widgets.settings);
     detach(&widgets.new_ws);
     detach(&widgets.open_folder);
+    detach(&widgets.pending);
+    {
+        let chip = state.borrow().fullscreen_project.clone();
+        detach(&chip);
+        chip.set_visible(false);
+    }
     detach(&widgets.minimize);
     detach(&widgets.maximize);
     detach(&widgets.close);
@@ -3881,6 +3975,7 @@ fn toolbar_layout_matches(
             widgets.settings.upcast_ref(),
             widgets.new_ws.upcast_ref(),
             widgets.open_folder.upcast_ref(),
+            widgets.pending.upcast_ref(),
             widgets.minimize.upcast_ref(),
             widgets.maximize.upcast_ref(),
             widgets.close.upcast_ref(),
@@ -3896,6 +3991,7 @@ fn layout_top_bar_visible(w: &TopBarWidgets, controls_side: app_config::WindowCo
     w.content.append(&w.settings);
     w.content.append(&w.new_ws);
     w.content.append(&w.open_folder);
+    w.content.append(&w.pending);
     w.content.append(&w.indicator_scroll);
 
     match controls_side {
@@ -3939,6 +4035,7 @@ fn layout_sidebar_header(w: &TopBarWidgets, controls_side: app_config::WindowCon
             w.sidebar_header.append(&w.settings);
             w.sidebar_header.append(&w.new_ws);
             w.sidebar_header.append(&w.open_folder);
+            w.sidebar_header.append(&w.pending);
         }
         app_config::WindowControlsSide::Right => {
             // dock | settings | + | folder || spacer || min | max | close
@@ -3946,6 +4043,7 @@ fn layout_sidebar_header(w: &TopBarWidgets, controls_side: app_config::WindowCon
             w.sidebar_header.append(&w.settings);
             w.sidebar_header.append(&w.new_ws);
             w.sidebar_header.append(&w.open_folder);
+            w.sidebar_header.append(&w.pending);
             w.sidebar_header.append(&spacer);
             w.sidebar_header.append(&w.minimize);
             w.sidebar_header.append(&w.maximize);
@@ -3968,8 +4066,17 @@ fn layout_collapsed_dock(state: &State, w: &TopBarWidgets, allow_retry: bool) {
 
     let leading_box =
         active_workspace_leading_pane(state).and_then(|pane| pane::pane_leading_box(&pane));
+    // Both bars hidden (full screen): the pending counter rides along with
+    // the dock toggle, so finished work stays one click away.
     match leading_box {
-        Some(leading) => leading.append(&w.dock),
+        Some(leading) => {
+            leading.append(&w.dock);
+            leading.append(&w.pending);
+            // Without the sidebar and top bar, say which project this is.
+            let chip = state.borrow().fullscreen_project.clone();
+            leading.append(&chip);
+            agent_activity_ui::sync_fullscreen_project(state);
+        }
         None => {
             if allow_retry {
                 let state = state.clone();
@@ -3979,6 +4086,7 @@ fn layout_collapsed_dock(state: &State, w: &TopBarWidgets, allow_retry: bool) {
             } else {
                 // With no workspace, there is no pane header to host the toggle.
                 w.content.append(&w.dock);
+                w.content.append(&w.pending);
                 w.handle.set_visible(true);
             }
         }
@@ -4483,11 +4591,14 @@ fn show_workspace_context_menu(state: &State, workspace_id: &str, row: &gtk::Lis
 
     let group_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
     menu_box.append(&group_box);
+    let arrange_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    menu_box.append(&arrange_box);
 
     menu_box.append(&delete_btn);
 
     let popover = sidebar_menu_popover(state, row, &menu_box);
     sidebar_groups::append_workspace_group_items(state, workspace_id, &group_box, &popover);
+    sidebar_groups::append_bring_up_item(state, &arrange_box, &popover);
 
     for (color, button) in swatches {
         let state = state.clone();
@@ -5245,6 +5356,8 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
         app_state.sidebar_list.append(&row);
         app_state.indicator_box.append(&indicator_button);
         install_workspace_row_interactions(state, &new_workspace_id, &row, &favorite_button);
+        let (sessions_toggle, sessions_box, row_extras) =
+            agent_activity_ui::attach_session_list(state, &new_workspace_id, &row);
 
         app_state.workspaces.push(Workspace {
             id: new_workspace_id.clone(),
@@ -5266,6 +5379,9 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
             path_label,
             indicator_button,
             indicator_unread_dot,
+            sessions_toggle,
+            sessions_box,
+            row_extras,
         });
         app_state
             .sidebar
@@ -5959,6 +6075,8 @@ fn break_tabs_into_new_workspace(
         app_state.sidebar_list.append(&row);
         app_state.indicator_box.append(&indicator_button);
         install_workspace_row_interactions(state, &new_workspace_id, &row, &favorite_button);
+        let (sessions_toggle, sessions_box, row_extras) =
+            agent_activity_ui::attach_session_list(state, &new_workspace_id, &row);
 
         if let Some(prev_id) = app_state
             .workspaces
@@ -5988,6 +6106,9 @@ fn break_tabs_into_new_workspace(
             path_label,
             indicator_button,
             indicator_unread_dot,
+            sessions_toggle,
+            sessions_box,
+            row_extras,
         });
         app_state
             .sidebar
@@ -6796,6 +6917,30 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 map.insert("ok".to_string(), serde_json::Value::Bool(true));
             }
             let _ = reply.send(Ok(payload));
+        }
+        ControlCommand::AgentActivity {
+            target,
+            surface_hint,
+            agent,
+            phase,
+            session_id,
+            at_ms,
+            detail,
+            reply,
+        } => {
+            let _ = reply.send(agent_activity_ui::handle_agent_activity(
+                state,
+                &target,
+                &surface_hint,
+                crate::agent_activity::AgentEvent {
+                    tab_id: String::new(),
+                    agent,
+                    phase,
+                    session_id,
+                    at_ms,
+                    detail,
+                },
+            ));
         }
         ControlCommand::CreateNotification {
             target,
@@ -7656,6 +7801,8 @@ fn add_workspace_with_initial_command_mode(
         );
     sidebar_list.append(&row);
     install_workspace_row_interactions(state, &id, &row, &favorite_button);
+    let (sessions_toggle, sessions_box, row_extras) =
+        agent_activity_ui::attach_session_list(state, &id, &row);
     // Wire close button
     {
         let state = state.clone();
@@ -7710,6 +7857,9 @@ fn add_workspace_with_initial_command_mode(
         path_label,
         indicator_button,
         indicator_unread_dot,
+        sessions_toggle,
+        sessions_box,
+        row_extras,
     };
 
     if workspace.favorite {
@@ -8122,9 +8272,6 @@ fn close_workspace_by_id_internal(
     // it (see `terminal::unset_focus_within`).
     split_container.retire_panes();
     crate::terminal::remove_from_stack_after_repaint(&ws.root);
-    if previous_active_workspace_id.as_deref() != Some(new_workspace_id.as_str()) {
-        clear_visible_tab_unread(state, &new_workspace_id);
-    }
     select_sidebar_row_silently(state, &sidebar_list, &row);
     // Refresh group counts, and show the new active row if it is collapsed.
     sidebar_groups::sync_sidebar(state);
@@ -8256,19 +8403,14 @@ fn switch_workspace(state: &State, idx: usize) {
 }
 
 fn switch_workspace_with_focus(state: &State, idx: usize, focus_entrypoint: bool) {
-    let active_workspace_id = {
+    {
         let s = state.borrow();
-        if idx >= s.workspaces.len() {
+        if idx >= s.workspaces.len() || idx == s.active_idx {
             return;
         }
-        (idx == s.active_idx).then(|| s.workspaces[idx].id.clone())
-    };
-    if let Some(workspace_id) = active_workspace_id {
-        clear_visible_tab_unread(state, &workspace_id);
-        return;
     }
 
-    let (stack, stack_name, focus_root, workspace_id, remembered_pane) = {
+    let (stack, stack_name, focus_root, _, remembered_pane) = {
         let mut s = state.borrow_mut();
         if let Some(prev_id) = s
             .workspaces
@@ -8292,8 +8434,7 @@ fn switch_workspace_with_focus(state: &State, idx: usize, focus_entrypoint: bool
     };
 
     stack.set_visible_child_name(&stack_name);
-    clear_visible_tab_unread(state, &workspace_id);
-    // A collapsed group shows only its active member.
+    // A collapsed group shows only its active member (and waiting ones).
     sidebar_groups::sync_row_visibility(state);
     if focus_entrypoint {
         glib::idle_add_local_once(move || {
@@ -8423,7 +8564,7 @@ fn capture_focus_restore_target(state: &State) -> Option<FocusRestoreTarget> {
                 focus_restore_target_for_pane(&workspace_id, &split_container, &widget)
             {
                 if let Ok(mut app_state) = state.try_borrow_mut() {
-                    app_state.last_focused_surface = Some(target.clone());
+                    note_focused_surface(&mut app_state, target.clone());
                 }
                 return Some(target);
             }
@@ -8441,10 +8582,57 @@ fn capture_focus_restore_target(state: &State) -> Option<FocusRestoreTarget> {
     let target = focus_restore_target_for_pane(&workspace_id, &split_container, &shown_pane);
     if let Some(target) = target.as_ref() {
         if let Ok(mut app_state) = state.try_borrow_mut() {
-            app_state.last_focused_surface = Some(target.clone());
+            note_focused_surface(&mut app_state, target.clone());
         }
     }
     target
+}
+
+/// Remember the focused terminal; the one before it becomes the way back.
+fn note_focused_surface(app_state: &mut AppState, target: FocusRestoreTarget) {
+    if let Some(last) = app_state.last_focused_surface.take() {
+        if last.tab_id != target.tab_id {
+            app_state.previous_surface = Some(last);
+        }
+    }
+    app_state.last_focused_surface = Some(target);
+}
+
+/// Go back to the terminal used before the current one, in any project.
+/// Returns false when there is none (it closed, or nothing was used yet).
+fn jump_to_previous_terminal(state: &State) -> bool {
+    let target = {
+        let s = state.borrow();
+        let active = s.active_workspace().map(|workspace| workspace.id.clone());
+        match &s.last_focused_surface {
+            // A switch whose focus is not recorded yet: the last terminal
+            // is the one to go back to.
+            Some(last) if Some(&last.workspace_id) != active.as_ref() => Some(last.clone()),
+            _ => s.previous_surface.clone(),
+        }
+    };
+    let Some(target) = target else {
+        return false;
+    };
+    if !pane::terminal_tabs_by_id().contains_key(&target.tab_id)
+        || !state
+            .borrow()
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == target.workspace_id)
+    {
+        return false;
+    }
+    activate_desktop_notification_target(
+        state,
+        &DesktopNotificationTarget {
+            workspace_id: target.workspace_id,
+            pane_id: Some(target.pane_id),
+            tab_id: Some(target.tab_id),
+        },
+        None,
+    );
+    true
 }
 
 fn focus_restore_target_for_pane(
@@ -8505,7 +8693,7 @@ fn record_last_focused_surface_from_window(state: &State, window: &gtk::Window) 
             {
                 if let Ok(mut app_state) = state.try_borrow_mut() {
                     note_workspace_pane_focus(&mut app_state, &workspace_id, target.pane_id);
-                    app_state.last_focused_surface = Some(target);
+                    note_focused_surface(&mut app_state, target);
                 }
                 return;
             }
@@ -9843,6 +10031,14 @@ mod tests {
                 gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK
             ),
             Some(ShortcutCommand::NextUnreadTerminal)
+        );
+        assert_eq!(
+            shortcut_command_from_key_event(
+                &shortcuts,
+                gdk::Key::p,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK
+            ),
+            Some(ShortcutCommand::PendingPanel)
         );
         assert_eq!(
             shortcut_command_from_key_event(

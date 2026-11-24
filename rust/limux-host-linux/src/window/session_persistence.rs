@@ -204,6 +204,7 @@ pub(super) fn save_session_now(state: &State) {
         }
     };
     let session = snapshot_session_state(state);
+    kept_terminals::save(state);
     let task = store.save_in_background(session);
     let state = state.clone();
     glib::MainContext::default().spawn_local(async move {
@@ -450,6 +451,9 @@ pub(super) fn apply_loaded_session(state: &State, mut loaded: LoadedSession) {
         store.restored(restored);
     }
     suspend_persistence(state, false);
+    // The terminals the sidebar kept listed before the restart, as quiet;
+    // before the save below writes the list again.
+    kept_terminals::restore(state);
 
     save_session_now(state);
 }

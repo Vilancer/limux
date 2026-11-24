@@ -83,7 +83,6 @@ pub(super) fn build_tab_button_from_label(
         let content_stack = internals.content_stack.clone();
         let tab_state = internals.tab_state.clone();
         let callbacks = internals.callbacks.clone();
-        let pane_widget = internals.pane_outer.downgrade();
         let tab_button = tab_btn.downgrade();
         let label = label.clone();
         click.connect_pressed(move |gesture, n_press, _, _| {
@@ -121,14 +120,6 @@ pub(super) fn build_tab_button_from_label(
                         target.focus();
                     });
                 }
-            }
-            if let Some(pane_widget) = pane_widget.upgrade() {
-                clear_tab_unread_if_visible(
-                    &tab_state,
-                    &tab_id,
-                    pane_widget.upcast_ref(),
-                    &callbacks,
-                );
             }
             if !already_active {
                 (callbacks.on_state_changed)();
@@ -354,6 +345,44 @@ pub(super) fn show_tab_context_menu(
         });
     }
 
+    // Whether its own output lists it in the sidebar. Programs that redraw
+    // on their own (htop, watch, tail -f) otherwise always count as working.
+    let tracking = context
+        .tab_state
+        .borrow()
+        .tabs
+        .iter()
+        .find(|entry| entry.id == tab_id)
+        .and_then(|entry| {
+            matches!(entry.kind, TabKind::Terminal { .. }).then_some(!entry.untracked)
+        });
+    let track_btn = tracking.map(|tracking| {
+        let button = gtk::Button::with_label(if tracking {
+            "Don't Track Output"
+        } else {
+            "Track Output Again"
+        });
+        button.add_css_class("flat");
+        button.set_tooltip_text(Some(
+            "A terminal that prints on its own is listed as working in the sidebar. \
+             Turn this off for programs that redraw all the time, such as htop or tail -f.",
+        ));
+        let state = context.tab_state.clone();
+        let tid = tab_id.to_string();
+        let menu_ref = menu.downgrade();
+        let callbacks = context.callbacks.clone();
+        button.connect_clicked(move |_| {
+            if let Some(menu) = menu_ref.upgrade() {
+                menu.popdown();
+            }
+            if let Some(entry) = state.borrow_mut().find_tab_mut(&tid) {
+                entry.untracked = tracking;
+            }
+            (callbacks.on_state_changed)();
+        });
+        button
+    });
+
     // Rename
     let rename_btn = gtk::Button::with_label("Rename");
     rename_btn.add_css_class("flat");
@@ -443,6 +472,9 @@ pub(super) fn show_tab_context_menu(
     }
 
     menu_box.append(&unread_btn);
+    if let Some(track_btn) = &track_btn {
+        menu_box.append(track_btn);
+    }
     menu_box.append(&rename_btn);
     menu_box.append(&pin_btn);
     menu_box.append(&close_btn);

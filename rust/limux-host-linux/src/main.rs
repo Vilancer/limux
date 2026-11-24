@@ -1,3 +1,4 @@
+mod agent_activity;
 mod app_config;
 mod browser_link;
 mod browser_sandbox;
@@ -23,6 +24,7 @@ mod tab_activity;
 mod terminal;
 mod terminal_font;
 mod window;
+mod working_spinner;
 mod workspace_color;
 mod workspace_group;
 mod x11_cursor_errors;

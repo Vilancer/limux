@@ -20,6 +20,8 @@ pub(super) const ABNORMAL_EXIT_RUNTIME: Duration = Duration::from_millis(250);
 pub(super) const DRIVEN_EXIT_WINDOW: Duration = Duration::from_secs(2);
 
 pub(super) const EXITED_TAB_CSS_CLASS: &str = "limux-tab-exited";
+/// Also on a held tab whose process failed (a non-zero code or a signal).
+pub(super) const FAILED_TAB_CSS_CLASS: &str = "limux-tab-failed";
 const EXIT_BANNER_CSS_CLASS: &str = "limux-exit-banner";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -325,6 +325,18 @@ pub enum ControlCommand {
         body: String,
         reply: mpsc::Sender<BridgeResult>,
     },
+    /// Live agent state for one terminal, from an agent hook.
+    AgentActivity {
+        target: WorkspaceTarget,
+        surface_hint: String,
+        agent: String,
+        /// `None` when the agent session ended.
+        phase: Option<crate::agent_activity::AgentPhase>,
+        session_id: Option<String>,
+        at_ms: u64,
+        detail: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
 }
 
 impl ControlCommand {
@@ -365,7 +377,8 @@ impl ControlCommand {
             | Self::TabAction { reply, .. }
             | Self::BrowserOpenSplit { reply, .. }
             | Self::BrowserAction { reply, .. }
-            | Self::CreateNotification { reply, .. } => {
+            | Self::CreateNotification { reply, .. }
+            | Self::AgentActivity { reply, .. } => {
                 let _ = reply.send(result);
             }
         }
@@ -1699,6 +1712,52 @@ fn handle_method(
                 rx,
             )
         }
+        "agent.activity" => {
+            let Some(surface_hint) = optional_string(params, &["surface_id", "tab_id"]) else {
+                return error_response(
+                    id,
+                    BridgeError::invalid_params("agent.activity requires surface_id"),
+                );
+            };
+            let state = optional_string(params, &["state"]).unwrap_or_default();
+            let phase = match state.as_str() {
+                "ended" => None,
+                other => match crate::agent_activity::AgentPhase::parse(other) {
+                    Some(phase) => Some(phase),
+                    None => {
+                        return error_response(
+                            id,
+                            BridgeError::invalid_params(
+                                "agent.activity state must be working, needs_approval, \
+                                 needs_input, idle or ended",
+                            ),
+                        );
+                    }
+                },
+            };
+            let target = match parse_optional_workspace_target(params, true) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::AgentActivity {
+                    target,
+                    surface_hint,
+                    agent: optional_string(params, &["agent"])
+                        .unwrap_or_else(|| "agent".to_string()),
+                    phase,
+                    session_id: optional_string(params, &["session_id"]),
+                    at_ms: params
+                        .get("at_ms")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default(),
+                    detail: optional_string(params, &["detail"]),
+                    reply,
+                },
+                rx,
+            )
+        }
         _ => {
             return error_response(
                 id,
@@ -2828,6 +2887,67 @@ mod tests {
 
         assert_eq!(response.error, None);
         assert_eq!(response.result.expect("result")["ok"], true);
+    }
+
+    #[test]
+    fn agent_activity_route_carries_surface_state_and_order() {
+        let response = dispatch_request(
+            r#"{"id":1,"method":"agent.activity","params":{"workspace_id":"codex","surface_id":"tab-1","agent":"claude","state":"needs_approval","session_id":"s1","at_ms":42}}"#,
+            &|command| match command {
+                ControlCommand::AgentActivity {
+                    target,
+                    surface_hint,
+                    agent,
+                    phase,
+                    session_id,
+                    at_ms,
+                    detail,
+                    reply,
+                } => {
+                    assert_eq!(detail, None);
+                    assert_eq!(target, WorkspaceTarget::Name("codex".to_string()));
+                    assert_eq!(surface_hint, "tab-1");
+                    assert_eq!(agent, "claude");
+                    assert_eq!(
+                        phase,
+                        Some(crate::agent_activity::AgentPhase::NeedsApproval)
+                    );
+                    assert_eq!(session_id.as_deref(), Some("s1"));
+                    assert_eq!(at_ms, 42);
+                    let _ = reply.send(Ok(json!({ "ok": true })));
+                }
+                other => panic!("unexpected command: {other:?}"),
+            },
+        );
+        assert_eq!(response.error, None);
+
+        let ended = dispatch_request(
+            r#"{"id":2,"method":"agent.activity","params":{"surface_id":"tab-1","state":"ended"}}"#,
+            &|command| match command {
+                ControlCommand::AgentActivity { phase, reply, .. } => {
+                    assert_eq!(phase, None);
+                    let _ = reply.send(Ok(json!({})));
+                }
+                other => panic!("unexpected command: {other:?}"),
+            },
+        );
+        assert_eq!(ended.error, None);
+
+        for params in [
+            r#"{"state":"working"}"#,
+            r#"{"surface_id":"tab-1","state":"busy"}"#,
+            r#"{"surface_id":"tab-1"}"#,
+        ] {
+            let response = dispatch_request(
+                &format!(r#"{{"id":3,"method":"agent.activity","params":{params}}}"#),
+                &|command| panic!("invalid params dispatched: {command:?}"),
+            );
+            assert_eq!(
+                response.error.map(|error| error.code),
+                Some(INVALID_PARAMS_CODE),
+                "{params}"
+            );
+        }
     }
 
     fn dispatched_gui_hook_request(method: &str, params: Value) -> GuiHookRequest {

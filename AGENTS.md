@@ -77,7 +77,8 @@ When fixing user-visible CLI behavior, verify the production GTK bridge path,
 not only the standalone dispatcher. The live bridge supports system
 capabilities/identify, window activation, workspace and workspace-group
 management, pane/surface focus and lifecycle, terminal send/key/read/health,
-tab actions, GUI lifecycle hooks (`gui_hook.*`), notifications, terminal and
+tab actions, GUI lifecycle hooks (`gui_hook.*`), notifications, live agent
+state from hooks (`agent.activity`), terminal and
 browser pane creation, browser navigation/history, and tmux-compatible
 workspace and pane commands. Canonical RPC method specs (`CORE_COMMAND_NAMES`,
 `GTK_BRIDGE_COMMAND_NAMES`, socket `wire_aliases`, and `cli_subcommands`) live in
@@ -123,6 +124,33 @@ The CLI surface lives in `rust/limux-cli/src/main.rs`:
 - `agent_launch_command` maps supported agents to launch commands.
 - `run_agent_team` splits the current workspace and launches peers.
 - `build_agents_md` writes the generated runtime protocol file.
+
+Live agent state: `limux --json hooks claude <event>` maps Claude Code hook
+events to the host-only `agent.activity` method
+(`agent_activity_state`, `agent_activity_params`). Params:
+
+- `surface_id` (required): the terminal, from `LIMUX_SURFACE_ID`.
+- `state` (required): `working`, `needs_approval`, `needs_input`, `idle` or
+  `ended`.
+- `agent`, `session_id`, `at_ms` (Unix ms when the hook ran; an older event
+  than the tab's last one is dropped) and `detail` (one line such as
+  `Bash: cargo test`).
+
+The host keeps it per tab in `agent_activity.rs` (pure, table-tested). No hook
+reports an Esc interrupt, a denied permission or a killed agent, so a working
+or waiting tab whose terminal printed nothing for 10 s settles to idle; this
+needs the tab activity setting, which tracks PTY output.
+
+Plain terminals get the same store under the agent name `terminal`
+(`ActivityStore::track_terminal`): a 1 s pass marks a tab working while it
+prints on its own (`TabActivity::working_since`: output while the terminal is
+not on screen, more than 1 s after the last key, paste, resize or focus
+change; during the first 15 s after its shell starts or an agent session ends,
+only once something was typed or sent) and idle when it stops, unread if it
+stopped off screen. Idle entries are the "quiet" terminals
+the sidebar keeps until the user closes them (`ActivityStore::dismiss`). Unread
+marks clear only on typing (`TerminalCallbacks::on_input` with `typed`) or an
+explicit mark-read, never on viewing.
 
 Keep `limux agent-team --dry-run` working without a host. For live behavior,
 the headless Weston smoke script exercises terminal surface health, input and

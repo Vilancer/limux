@@ -138,6 +138,10 @@ pub struct TabState {
     pub custom_name: Option<String>,
     #[serde(default)]
     pub pinned: bool,
+    /// Its own output does not list it in the sidebar (a program that
+    /// redraws on its own, such as htop or tail -f).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untracked: bool,
     #[serde(flatten)]
     pub content: TabContentState,
 }
@@ -257,6 +261,7 @@ impl TabState {
             id: id.into(),
             custom_name: None,
             pinned: false,
+            untracked: false,
             content: TabContentState::Terminal {
                 cwd: cwd.map(|value| value.to_string()),
                 agent: None,
@@ -270,6 +275,7 @@ impl TabState {
             id: id.into(),
             custom_name: None,
             pinned: false,
+            untracked: false,
             content: TabContentState::Browser {
                 uri: uri.map(|value| value.to_string()),
             },
@@ -1592,6 +1598,7 @@ mod tests {
                 id: "tab-a".to_string(),
                 custom_name: None,
                 pinned: false,
+                untracked: false,
                 content: TabContentState::Terminal {
                     ssh: None,
                     cwd: Some("/tmp/project".to_string()),
@@ -1772,6 +1779,7 @@ mod tests {
             id: "tab-a".to_string(),
             custom_name: None,
             pinned: false,
+            untracked: false,
             content: TabContentState::Terminal {
                 ssh: None,
                 cwd: Some("/tmp/project".to_string()),
@@ -1860,6 +1868,7 @@ mod tests {
                 id: "browser-1".to_string(),
                 custom_name: None,
                 pinned: false,
+                untracked: false,
                 content: TabContentState::Browser {
                     uri: Some("https://example.com".to_string()),
                 },
@@ -1975,6 +1984,7 @@ mod tests {
                         id: "keybinds-1".to_string(),
                         custom_name: None,
                         pinned: false,
+                        untracked: false,
                         content: TabContentState::Keybinds {},
                     }],
                 }),

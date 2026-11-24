@@ -137,6 +137,8 @@ These are the current supported config keys and defaults:
 | `recent_workspace` | `<Ctrl><Alt>o` |
 | `next_unread_terminal` | `<Ctrl><Alt>u` |
 | `prev_unread_terminal` | `<Ctrl><Alt><Shift>u` |
+| `next_working_terminal` | `<Ctrl><Alt>j` |
+| `pending_panel` | `<Ctrl><Alt>p` |
 | `open_browser_in_split` | `<Ctrl><Shift>l` |
 | `browser_focus_location` | `<Ctrl>l` |
 | `browser_back` | `<Ctrl>bracketleft` |
@@ -269,6 +271,9 @@ Launch Limux and verify:
 - `Ctrl+Alt+N` opens a second Limux instance
 - `Ctrl+Alt+K` clears terminal scrollback
 - `Ctrl+Alt+Shift+0` resets terminal font size
+- `Ctrl+Alt+P` opens the pending panel (check that the desktop does not bind
+  it first: KDE `~/.config/kglobalshortcutsrc`, GNOME
+  `gsettings list-recursively | grep -i '<Alt>p'`)
 
 ### 2. Remap One Shortcut
 
