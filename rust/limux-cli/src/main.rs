@@ -1183,7 +1183,7 @@ async fn run_agent_hook(
 
     persist_agent_hook_session(agent, args, &payload, &event)?;
     let provider = agent_providers::provider(agent);
-    let reading = provider.read(&event, &payload);
+    let reading = agent_providers::read(agent, &event, &payload);
     let notification_title_body = reading
         .notice
         .map(|notice| notice.title_body(agent.label()));

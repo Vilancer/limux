@@ -131,6 +131,21 @@ pub(crate) trait AgentProvider: Sync {
     }
 }
 
+/// Read one hook call with `agent`'s provider. Limux runs a restored agent
+/// in a wrapper that calls `cleanup` once the agent's process has exited, so
+/// that call ends the session for every agent: also when the agent never ran
+/// a hook of its own (refused to start in an untrusted folder, crashed).
+pub(crate) fn read(agent: AgentKind, event: &str, payload: &Value) -> HookReading {
+    let reading = provider(agent).read(event, payload);
+    if reading.state.is_none() && matches!(event, "Cleanup" | "cleanup" | "restore-exit") {
+        return HookReading {
+            state: Some(AgentState::Ended),
+            ..reading
+        };
+    }
+    reading
+}
+
 pub(crate) fn provider(agent: AgentKind) -> &'static dyn AgentProvider {
     match agent {
         AgentKind::Claude => &claude::Claude,

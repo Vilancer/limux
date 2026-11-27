@@ -591,6 +591,16 @@ mod tests {
     }
 
     #[test]
+    fn an_end_clears_a_terminal_restored_quiet() {
+        // Kept before a restart, then its resumed agent exits without a hook
+        // of its own: the wrapper's end names the session, the entry does not.
+        let mut store = ActivityStore::default();
+        assert!(store.restore_quiet("t", "claude", 1_000, Some("old".into())));
+        assert!(store.apply(event("t", None, Some("s"), 50_000)));
+        assert!(store.get("t").is_none());
+    }
+
+    #[test]
     fn a_turn_runs_waits_resumes_and_ends() {
         use AgentPhase::*;
         let mut store = ActivityStore::default();

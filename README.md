@@ -519,6 +519,8 @@ project rows and on terminal tabs.
   question you have not seen never disappears on its own. This needs
   **Settings > General > Tab activity indicators** (on by default), which
   tracks terminal output.
+- A restored agent that exits before reporting anything (Claude Code refusing
+  an untrusted folder, a crash) drops out of the lists when its process ends.
 - Agent state is live only: after a restart it comes back when the agent next
   reports. Other agents keep their notifications and show no live state yet.
 

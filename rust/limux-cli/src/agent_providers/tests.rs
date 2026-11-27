@@ -651,3 +651,25 @@ fn the_hook_templates_install_what_each_provider_reads() {
         }
     }
 }
+
+#[test]
+fn the_restore_wrapper_cleanup_ends_every_agent_session() {
+    // A restored agent that exits before its own hooks run (Claude Code
+    // refused an untrusted folder) must not stay listed as quiet.
+    for agent in [
+        AgentKind::Claude,
+        AgentKind::Codex,
+        AgentKind::Gemini,
+        AgentKind::OpenCode,
+        AgentKind::Agy,
+    ] {
+        let payload = json!({"session_id": "s", "hook_event_name": "Cleanup"});
+        let reading = super::read(agent, "cleanup", &payload);
+        assert_eq!(
+            reading.state.map(AgentState::wire_name),
+            Some("ended"),
+            "{agent:?}"
+        );
+        assert_eq!(reading.notice, None, "{agent:?}");
+    }
+}
