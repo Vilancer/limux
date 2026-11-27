@@ -335,6 +335,11 @@ pub enum ControlCommand {
         session_id: Option<String>,
         at_ms: u64,
         detail: Option<String>,
+        /// A subagent of the session reported it, not the main agent.
+        subagent: bool,
+        /// Whether an idle agent wakes up on its own (background work, a
+        /// wake-up); `None` when the report does not say.
+        background: Option<bool>,
         reply: mpsc::Sender<BridgeResult>,
     },
 }
@@ -1753,6 +1758,11 @@ fn handle_method(
                         .and_then(Value::as_u64)
                         .unwrap_or_default(),
                     detail: optional_string(params, &["detail"]),
+                    subagent: params
+                        .get("subagent")
+                        .and_then(Value::as_bool)
+                        .unwrap_or_default(),
+                    background: params.get("background").and_then(Value::as_bool),
                     reply,
                 },
                 rx,
@@ -2902,9 +2912,13 @@ mod tests {
                     session_id,
                     at_ms,
                     detail,
+                    subagent,
+                    background,
                     reply,
                 } => {
                     assert_eq!(detail, None);
+                    assert!(!subagent);
+                    assert_eq!(background, None);
                     assert_eq!(target, WorkspaceTarget::Name("codex".to_string()));
                     assert_eq!(surface_hint, "tab-1");
                     assert_eq!(agent, "claude");
@@ -2932,6 +2946,24 @@ mod tests {
             },
         );
         assert_eq!(ended.error, None);
+
+        let paused = dispatch_request(
+            r#"{"id":4,"method":"agent.activity","params":{"surface_id":"tab-1","state":"idle","background":true,"detail":"Background: cargo test"}}"#,
+            &|command| match command {
+                ControlCommand::AgentActivity {
+                    background,
+                    detail,
+                    reply,
+                    ..
+                } => {
+                    assert_eq!(background, Some(true));
+                    assert_eq!(detail.as_deref(), Some("Background: cargo test"));
+                    let _ = reply.send(Ok(json!({})));
+                }
+                other => panic!("unexpected command: {other:?}"),
+            },
+        );
+        assert_eq!(paused.error, None);
 
         for params in [
             r#"{"state":"working"}"#,

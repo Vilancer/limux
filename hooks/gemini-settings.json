@@ -1,13 +1,25 @@
 {
   "hooks": {
-    "SessionStart": [
+    "AfterAgent": [
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "[ \"${LIMUX_GEMINI_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks gemini session-start || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "command": "[ \"${LIMUX_GEMINI_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks gemini stop || echo '{\"continue\":true,\"suppressOutput\":false}'",
             "statusMessage": "Limux Gemini session restore",
-            "timeout": 5000
+            "timeout": 5000,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "hooks": [
+          {
+            "command": "[ \"${LIMUX_GEMINI_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks gemini post-tool-use || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "statusMessage": "Limux Gemini activity",
+            "timeout": 5000,
+            "type": "command"
           }
         ]
       }
@@ -16,22 +28,22 @@
       {
         "hooks": [
           {
-            "type": "command",
             "command": "[ \"${LIMUX_GEMINI_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks gemini prompt-submit || echo '{\"continue\":true,\"suppressOutput\":false}'",
             "statusMessage": "Limux Gemini session restore",
-            "timeout": 5000
+            "timeout": 5000,
+            "type": "command"
           }
         ]
       }
     ],
-    "AfterAgent": [
+    "Notification": [
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "[ \"${LIMUX_GEMINI_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks gemini stop || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "command": "[ \"${LIMUX_GEMINI_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks gemini notification || echo '{\"continue\":true,\"suppressOutput\":false}'",
             "statusMessage": "Limux Gemini session restore",
-            "timeout": 5000
+            "timeout": 5000,
+            "type": "command"
           }
         ]
       }
@@ -40,10 +52,22 @@
       {
         "hooks": [
           {
-            "type": "command",
             "command": "[ \"${LIMUX_GEMINI_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks gemini session-end || echo '{\"continue\":true,\"suppressOutput\":false}'",
             "statusMessage": "Limux Gemini session restore",
-            "timeout": 5000
+            "timeout": 5000,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "[ \"${LIMUX_GEMINI_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks gemini session-start || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "statusMessage": "Limux Gemini session restore",
+            "timeout": 5000,
+            "type": "command"
           }
         ]
       }

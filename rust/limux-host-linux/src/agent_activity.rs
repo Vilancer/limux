@@ -74,6 +74,13 @@ pub struct AgentEvent {
     /// What the agent does, in one line ("Bash: cargo test"); `None` keeps
     /// the previous line while the phase stays the same.
     pub detail: Option<String>,
+    /// A subagent of the session reported it (Claude Code's background
+    /// agents), not the agent the user talks to.
+    pub subagent: bool,
+    /// Whether an idle agent wakes up on its own: work still runs in the
+    /// background (a command it waits on) or a wake-up is scheduled. Known at
+    /// the end of a turn; `None` keeps what the tab had (an idle reminder).
+    pub background: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +92,10 @@ pub struct SurfaceActivity {
     /// When the current phase began (Unix ms), for "working for 3m".
     pub since_ms: u64,
     pub detail: Option<String>,
+    /// The wait was raised by a subagent: that subagent going on answers it.
+    pub subagent_wait: bool,
+    /// Quiet, but it wakes up on its own (see [`AgentEvent::background`]).
+    pub background: bool,
 }
 
 #[derive(Debug, Default)]
@@ -131,17 +142,72 @@ impl ActivityStore {
                 same_session && self.remove(&event.tab_id, event.at_ms)
             }
             Some(phase) => {
-                // The same phase of the same session keeps its start and line. A
-                // new session (the old one died without an end hook) starts over.
+                // A new session (the old one died without an end hook) starts
+                // over; nothing of the old one carries into it.
+                let same_session =
+                    |current: &&SurfaceActivity| match (&current.session_id, &event.session_id) {
+                        (Some(current), Some(next)) => current == next,
+                        _ => true,
+                    };
+                // A subagent's tool says nothing of the agent the user talks
+                // to: it may wait for its background agents ("Waiting on")
+                // or ask the user something. It only answers a wait that a
+                // subagent raised, which no keypress clears for a question.
+                if event.subagent && phase == AgentPhase::Working {
+                    let Some(current) = self.surfaces.get_mut(&event.tab_id) else {
+                        return false;
+                    };
+                    if !(current.phase.is_waiting() && current.subagent_wait)
+                        || !same_session(&&*current)
+                    {
+                        return false;
+                    }
+                    current.phase = AgentPhase::Working;
+                    current.at_ms = event.at_ms;
+                    current.since_ms = event.at_ms;
+                    current.detail = None;
+                    current.subagent_wait = false;
+                    current.background = false;
+                    return true;
+                }
+                // A waiting report that says nothing of its own (Claude Code's
+                // generic "needs your permission" notification, which follows
+                // its PermissionRequest) keeps the wait it joins: its sign (a
+                // question stays a question) and its line. A report with a line
+                // of its own (the next PermissionRequest) replaces it.
+                let waiting = current.filter(|current| {
+                    same_session(current)
+                        && current.agent == event.agent
+                        && current.phase.is_waiting()
+                        && phase.is_waiting()
+                        && event.detail.is_none()
+                });
+                let phase = waiting.map_or(phase, |current| current.phase);
+                // A report that joins a wait is part of it, and keeps whose it is.
+                let subagent_wait = waiting
+                    .map_or(event.subagent && phase.is_waiting(), |current| {
+                        current.subagent_wait
+                    });
+                // Paused on background work until a turn's end says otherwise.
+                let background = phase == AgentPhase::Idle
+                    && event.background.unwrap_or_else(|| {
+                        current.is_some_and(|current| {
+                            current.phase == AgentPhase::Idle
+                                && current.background
+                                && same_session(&current)
+                        })
+                    });
+                // The same phase of the same session keeps its start and line,
+                // but a turn that no longer waits on background work does not
+                // keep the line that named it.
                 let continued = current.filter(|current| {
                     current.phase == phase
-                        && match (&current.session_id, &event.session_id) {
-                            (Some(current), Some(next)) => current == next,
-                            _ => true,
-                        }
+                        && same_session(current)
+                        && current.background == background
                 });
-                let detail = event
-                    .detail
+                let detail = waiting
+                    .and_then(|current| current.detail.clone())
+                    .or(event.detail)
                     .or_else(|| continued.and_then(|current| current.detail.clone()));
                 let since_ms = continued.map_or(event.at_ms, |current| current.since_ms);
                 let next = SurfaceActivity {
@@ -151,11 +217,14 @@ impl ActivityStore {
                     at_ms: event.at_ms,
                     since_ms,
                     detail,
+                    subagent_wait,
+                    background,
                 };
                 let changed = current.is_none_or(|current| {
                     current.phase != next.phase
                         || current.agent != next.agent
                         || current.detail != next.detail
+                        || current.background != next.background
                 });
                 self.surfaces.insert(event.tab_id, next);
                 changed
@@ -184,11 +253,12 @@ impl ActivityStore {
         self.surfaces.is_empty()
     }
 
-    /// Tabs listed as idle, for closing them all at once.
+    /// Tabs listed as idle, for closing them all at once. One that wakes up
+    /// on its own (background work, a scheduled wake-up) is not done.
     pub fn idle_tabs(&self) -> Vec<String> {
         self.surfaces
             .iter()
-            .filter(|(_, activity)| activity.phase == AgentPhase::Idle)
+            .filter(|(_, activity)| activity.phase == AgentPhase::Idle && !activity.background)
             .map(|(tab_id, _)| tab_id.clone())
             .collect()
     }
@@ -228,6 +298,8 @@ impl ActivityStore {
                         at_ms: now_ms,
                         since_ms: since,
                         detail: None,
+                        subagent_wait: false,
+                        background: false,
                     },
                 );
                 TerminalChange::Started
@@ -257,6 +329,8 @@ impl ActivityStore {
         activity.at_ms = at_ms;
         activity.since_ms = at_ms;
         activity.detail = None;
+        activity.subagent_wait = false;
+        activity.background = false;
         true
     }
 
@@ -276,6 +350,8 @@ impl ActivityStore {
                 at_ms: now_ms,
                 since_ms: now_ms,
                 detail: None,
+                subagent_wait: false,
+                background: false,
             },
         );
         true
@@ -308,6 +384,8 @@ impl ActivityStore {
                 at_ms: since_ms,
                 since_ms,
                 detail,
+                subagent_wait: false,
+                background: false,
             },
         );
         true
@@ -558,6 +636,8 @@ mod tests {
             session_id: session.map(str::to_string),
             at_ms,
             detail: None,
+            subagent: false,
+            background: None,
         }
     }
 
@@ -573,6 +653,16 @@ mod tests {
         }
         assert_eq!(AgentPhase::parse("ended"), None);
         assert_eq!(AgentPhase::parse("Working"), None);
+    }
+
+    #[test]
+    fn an_end_clears_a_terminal_restored_quiet() {
+        // Kept before a restart, then its resumed agent exits without a hook
+        // of its own: the wrapper's end names the session, the entry does not.
+        let mut store = ActivityStore::default();
+        assert!(store.restore_quiet("t", "claude", 1_000, Some("old".into())));
+        assert!(store.apply(event("t", None, Some("s"), 50_000)));
+        assert!(store.get("t").is_none());
     }
 
     #[test]
@@ -962,7 +1052,8 @@ mod tests {
         // A question stays until its tool ends (a hook says so at once).
         store.apply(event("t", Some(AgentPhase::NeedsInput), Some("s"), 8_000));
         assert!(!store.answered("t", 9_000));
-        // The tool's end still applies after the answer.
+        // Its tool ends (PostToolUse), then the next tool asks for approval.
+        store.apply(event("t", Some(AgentPhase::Working), Some("s"), 9_500));
         store.apply(event(
             "t",
             Some(AgentPhase::NeedsApproval),
@@ -1010,5 +1101,131 @@ mod tests {
         // Closing the tab forgets it, so its id carries nothing over.
         store.retain_tabs(|_| false);
         assert!(store.apply(event("t", Some(AgentPhase::Working), None, 10)));
+    }
+    #[test]
+    fn a_turn_paused_on_background_work_stays_out_of_close_quiet() {
+        let paused = |at_ms, detail: &str| AgentEvent {
+            background: Some(true),
+            detail: Some(detail.to_string()),
+            ..event("t", Some(AgentPhase::Idle), Some("s"), at_ms)
+        };
+        let mut store = ActivityStore::default();
+        store.apply(event("t", Some(AgentPhase::Working), Some("s"), 1));
+        assert!(store.apply(paused(2, "Background: cargo test")));
+        store.apply(event("done", Some(AgentPhase::Idle), Some("d"), 2));
+        let current = store.get("t").unwrap();
+        assert_eq!(current.phase, AgentPhase::Idle);
+        assert!(current.background);
+        assert_eq!(current.detail.as_deref(), Some("Background: cargo test"));
+        assert_eq!(store.idle_tabs(), ["done"]);
+        // Claude Code's idle reminder a minute later cannot tell: it stays.
+        assert!(!store.apply(event("t", Some(AgentPhase::Idle), Some("s"), 3)));
+        let current = store.get("t").unwrap();
+        assert!(current.background);
+        assert_eq!(current.detail.as_deref(), Some("Background: cargo test"));
+        // It wakes up and ends its turn for good: done, and the line that
+        // named the command goes with it.
+        assert!(store.apply(AgentEvent {
+            background: Some(false),
+            ..event("t", Some(AgentPhase::Idle), Some("s"), 4)
+        }));
+        let current = store.get("t").unwrap();
+        assert!(!current.background);
+        assert_eq!(current.detail, None);
+        let mut idle = store.idle_tabs();
+        idle.sort_unstable();
+        assert_eq!(idle, ["done", "t"]);
+        // Only an idle report pauses: a working one never carries it over,
+        // and the reminder after it does not bring the pause back.
+        store.apply(paused(5, "Background: npm run dev"));
+        store.apply(AgentEvent {
+            background: Some(true),
+            ..event("t", Some(AgentPhase::Working), Some("s"), 6)
+        });
+        assert!(!store.get("t").unwrap().background);
+        store.apply(event("t", Some(AgentPhase::Idle), Some("s"), 7));
+        assert!(!store.get("t").unwrap().background);
+    }
+
+    #[test]
+    fn a_subagent_tool_answers_only_a_subagent_wait() {
+        let main = |phase, at_ms, detail: &str| AgentEvent {
+            detail: Some(detail.to_string()),
+            ..event("t", Some(phase), Some("s"), at_ms)
+        };
+        let sub = |phase, at_ms, detail: Option<&str>| AgentEvent {
+            subagent: true,
+            detail: detail.map(str::to_string),
+            ..event("t", Some(phase), Some("s"), at_ms)
+        };
+        let mut store = ActivityStore::default();
+        // The main agent's turn ended while a background agent runs.
+        store.apply(main(AgentPhase::Working, 1, "Waiting on: polling"));
+        assert!(!store.apply(sub(AgentPhase::Working, 2, None)));
+        let current = store.get("t").unwrap();
+        assert_eq!(current.detail.as_deref(), Some("Waiting on: polling"));
+        // The main agent asks: a background agent going on keeps the question.
+        store.apply(main(AgentPhase::NeedsInput, 3, "Which colour?"));
+        assert!(!store.apply(sub(AgentPhase::Working, 4, None)));
+        assert_eq!(store.phase("t"), Some(AgentPhase::NeedsInput));
+        // The background agent asks; once answered it goes on, and that
+        // clears its question.
+        store.apply(main(AgentPhase::Working, 5, "Waiting on: polling"));
+        store.apply(sub(
+            AgentPhase::NeedsInput,
+            6,
+            Some("builder needs your input"),
+        ));
+        assert!(store.get("t").unwrap().subagent_wait);
+        // Its generic follow-up joins the wait and keeps whose it is.
+        store.apply(event("t", Some(AgentPhase::NeedsInput), Some("s"), 7));
+        assert!(store.get("t").unwrap().subagent_wait);
+        assert!(store.apply(sub(AgentPhase::Working, 8, None)));
+        let current = store.get("t").unwrap();
+        assert_eq!(current.phase, AgentPhase::Working);
+        assert!(!current.subagent_wait);
+        // A subagent's tool on a terminal with no entry adds none.
+        assert!(!store.apply(AgentEvent {
+            subagent: true,
+            ..event("u", Some(AgentPhase::Working), Some("s"), 9)
+        }));
+        assert!(store.get("u").is_none());
+    }
+
+    #[test]
+    fn one_wait_keeps_its_first_sign_and_line() {
+        let with = |phase, at_ms, detail: &str| AgentEvent {
+            detail: Some(detail.to_string()),
+            ..event("t", Some(phase), Some("s"), at_ms)
+        };
+        let mut store = ActivityStore::default();
+        // Claude Code: a question through PermissionRequest, then the generic
+        // permission notification six seconds later.
+        store.apply(with(AgentPhase::Working, 1, "Read: main.rs"));
+        store.apply(with(AgentPhase::NeedsInput, 2, "Which colour?"));
+        store.apply(event("t", Some(AgentPhase::NeedsApproval), Some("s"), 3));
+        let current = store.get("t").unwrap();
+        assert_eq!(current.phase, AgentPhase::NeedsInput);
+        assert_eq!(current.detail.as_deref(), Some("Which colour?"));
+        // An approval keeps the tool it names.
+        store.apply(with(AgentPhase::Working, 4, "AskUserQuestion"));
+        store.apply(with(AgentPhase::NeedsApproval, 5, "Bash: touch hello.txt"));
+        store.apply(event("t", Some(AgentPhase::NeedsApproval), Some("s"), 6));
+        let current = store.get("t").unwrap();
+        assert_eq!(current.phase, AgentPhase::NeedsApproval);
+        assert_eq!(current.detail.as_deref(), Some("Bash: touch hello.txt"));
+        // A second request right after (parallel tools) names its own tool.
+        store.apply(with(AgentPhase::NeedsApproval, 7, "Bash: git push"));
+        assert_eq!(
+            store.get("t").unwrap().detail.as_deref(),
+            Some("Bash: git push")
+        );
+        // Working again ends the wait; the next one starts fresh.
+        store.apply(with(AgentPhase::Working, 8, "Bash: git push"));
+        store.apply(with(AgentPhase::NeedsApproval, 9, "Bash: rm hello.txt"));
+        assert_eq!(
+            store.get("t").unwrap().detail.as_deref(),
+            Some("Bash: rm hello.txt")
+        );
     }
 }

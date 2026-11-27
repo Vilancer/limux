@@ -404,20 +404,25 @@ after it starts is kept the same way, so its error stays readable.
 
 ### Agent activity in the sidebar
 
-With Claude Code hooks installed, each terminal reports what its agent is
-doing, and the sidebar shows it without opening anything.
-
-To set it up, or to update hooks installed by an older Limux, run:
+With an agent's hooks installed, each terminal reports what its agent is
+doing (working, waiting for an approval or an answer, finished, with one line
+of what it does), and the sidebar shows it without opening anything. Claude
+Code, Codex, Gemini CLI and OpenCode are supported. To set them up, or to
+update hooks installed by an older Limux, run one or more of:
 
 ```bash
-limux hooks setup claude
+limux hooks setup claude     # $CLAUDE_CONFIG_DIR/settings.json, else ~/.claude/settings.json
+limux hooks setup codex      # $CODEX_HOME/hooks.json, else ~/.codex/hooks.json
+limux hooks setup gemini     # ~/.gemini/settings.json
+limux hooks setup opencode   # a plugin in $OPENCODE_CONFIG_DIR, else ~/.config/opencode
 ```
 
-It writes to `$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`,
-and keeps your other hooks. If you use more than one Claude config directory,
+Each keeps your other hooks. If you use more than one Claude config directory,
 run it once per directory, for example
-`CLAUDE_CONFIG_DIR=~/.claude-work limux hooks setup claude`. Claude Code reads
-its hooks when a session starts, so restart running sessions afterwards.
+`CLAUDE_CONFIG_DIR=~/.claude-work limux hooks setup claude`. Agents read their
+hooks when a session starts, so restart running sessions afterwards. Codex asks
+you to review new hooks once (`/hooks`, then `t` to trust them all); until
+then it does not run them.
 
 | Sign | Meaning |
 |---|---|
@@ -483,7 +488,9 @@ project rows and on terminal tabs.
   `1`-`9`, focuses that terminal without expanding its group. `Delete` closes
   the selected finished or quiet one from the lists. **Mark all read** clears
   unread marks only (those terminals stay as quiet); a waiting terminal stays
-  until the agent continues. **Close quiet** closes every quiet one. Quiet
+  until the agent continues. **Close quiet** closes every quiet one, except
+  one whose agent wakes up on its own (it lists "Background: cargo test" or
+  "Wakes at 09:05"). It only removes rows: no terminal or command stops. Quiet
   terminals are listed but not counted. With nothing to list it explains the
   signs.
 - Under a project with one working or waiting terminal, a line says what it
@@ -514,6 +521,8 @@ project rows and on terminal tabs.
   question you have not seen never disappears on its own. This needs
   **Settings > General > Tab activity indicators** (on by default), which
   tracks terminal output.
+- A restored agent that exits before reporting anything (Claude Code refusing
+  an untrusted folder, a crash) drops out of the lists when its process ends.
 - Agent state is live only: after a restart it comes back when the agent next
   reports. Other agents keep their notifications and show no live state yet.
 

@@ -1,25 +1,61 @@
 {
   "hooks": {
-    "SessionStart": [
+    "Interrupt": [
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "[ \"${LIMUX_CODEX_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks codex session-start || echo '{\"continue\":true,\"suppressOutput\":false}'",
-            "statusMessage": "Limux Codex session restore",
-            "timeout": 5000
+            "command": "[ \"${LIMUX_CODEX_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks codex interrupt || echo '{}'",
+            "statusMessage": "Limux Codex activity",
+            "timeout": 3,
+            "type": "command"
           }
         ]
       }
     ],
-    "UserPromptSubmit": [
+    "PermissionRequest": [
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "[ \"${LIMUX_CODEX_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks codex prompt-submit || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "command": "[ \"${LIMUX_CODEX_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks codex permission-request || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "statusMessage": "Limux Codex activity",
+            "timeout": 5000,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "[ \"${LIMUX_CODEX_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks codex post-tool-use || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "statusMessage": "Limux Codex activity",
+            "timeout": 5000,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "[ \"${LIMUX_CODEX_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks codex session-end || echo '{}'",
             "statusMessage": "Limux Codex session restore",
-            "timeout": 5000
+            "timeout": 3,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "[ \"${LIMUX_CODEX_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks codex session-start || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "statusMessage": "Limux Codex session restore",
+            "timeout": 5000,
+            "type": "command"
           }
         ]
       }
@@ -28,10 +64,22 @@
       {
         "hooks": [
           {
-            "type": "command",
             "command": "[ \"${LIMUX_CODEX_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks codex stop || echo '{\"continue\":true,\"suppressOutput\":false}'",
             "statusMessage": "Limux Codex session restore",
-            "timeout": 5000
+            "timeout": 5000,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "[ \"${LIMUX_CODEX_HOOKS_DISABLED:-}\" != \"1\" ] && limux --json hooks codex prompt-submit || echo '{\"continue\":true,\"suppressOutput\":false}'",
+            "statusMessage": "Limux Codex session restore",
+            "timeout": 5000,
+            "type": "command"
           }
         ]
       }

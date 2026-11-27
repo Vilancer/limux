@@ -986,7 +986,7 @@ fn tab_agent_sign_box(entry: &TabEntry, create: bool) -> Option<gtk::Box> {
     Some(sign)
 }
 
-/// The fixed width, in characters, of what a background agent does.
+/// The most characters of what a background agent does that a tab shows.
 const TAB_AGENT_DETAIL_CHARS: i32 = 18;
 
 fn tab_agent_detail_label(entry: &TabEntry, create: bool) -> Option<gtk::Label> {
@@ -1005,10 +1005,8 @@ fn tab_agent_detail_label(entry: &TabEntry, create: bool) -> Option<gtk::Label> 
     let detail = gtk::Label::new(None);
     detail.add_css_class(TAB_AGENT_DETAIL_CSS_CLASS);
     detail.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    // One width for every detail: it changes with each tool the agent runs
-    // ("Poll", "Bash: cargo test …"), and the tab must not grow and shrink
-    // with it, or the tabs after it jump.
-    detail.set_width_chars(TAB_AGENT_DETAIL_CHARS);
+    // Only as wide as the detail, up to a cap: a reserved fixed width left a
+    // short detail ("Poll") with a wide empty gap before the close button.
     detail.set_max_width_chars(TAB_AGENT_DETAIL_CHARS);
     detail.set_xalign(0.0);
     detail.set_can_target(false);
