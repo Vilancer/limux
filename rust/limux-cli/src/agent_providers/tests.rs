@@ -229,6 +229,57 @@ fn claude_notifies_once_the_main_agent_is_done_with_what_it_said() {
 }
 
 #[test]
+fn claude_idle_reminder_sets_idle_without_a_second_notice() {
+    use AgentKind::Claude;
+    // About a minute after a turn its Stop announced as finished, Claude
+    // Code reminds that it waits. It asks for nothing new.
+    for payload in [
+        json!({"hook_event_name": "Notification", "notification_type": "idle_prompt",
+               "message": "Claude is waiting for your input"}),
+        // Older Claude Code: no type, only the message.
+        json!({"message": "Claude is waiting for your input"}),
+    ] {
+        let reading = read(Claude, "notification", payload.clone());
+        assert_eq!(reading.state, Some(AgentState::Idle), "{payload}");
+        assert_eq!(reading.notice, None, "{payload}");
+    }
+}
+
+#[test]
+fn claude_subagent_tools_leave_the_main_agent_state_alone() {
+    use AgentKind::Claude;
+    let subagent = |event: &str| {
+        read(
+            Claude,
+            event,
+            json!({"hook_event_name": "PostToolUse", "agent_id": "a1b2",
+                   "agent_type": "general-purpose", "tool_name": "Grep",
+                   "tool_input": {"pattern": "not_text|NUL|control"}}),
+        )
+    };
+    // Neither "Waiting on" nor a question of the main agent is replaced by
+    // what a background agent runs.
+    for event in ["post-tool-use", "PostToolUse", "PreToolUse"] {
+        assert_eq!(subagent(event), HookReading::default(), "{event}");
+    }
+    // The main agent's own tools still report.
+    let main = read(
+        Claude,
+        "post-tool-use",
+        json!({"tool_name": "Grep", "agent_id": "", "tool_input": {"pattern": "fn main"}}),
+    );
+    assert_eq!(main.state, Some(AgentState::Working));
+    assert_eq!(main.detail.as_deref(), Some("Grep: fn main"));
+    // A subagent that needs permission still needs the user.
+    let ask = read(
+        Claude,
+        "permission-request",
+        json!({"agent_id": "a1b2", "tool_name": "Bash", "tool_input": {"command": "rm -rf build"}}),
+    );
+    assert_eq!(ask.state, Some(AgentState::NeedsApproval));
+}
+
+#[test]
 fn the_detail_says_what_the_agent_does() {
     use AgentKind::Claude;
     let table = [
