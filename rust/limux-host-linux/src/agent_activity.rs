@@ -74,6 +74,9 @@ pub struct AgentEvent {
     /// What the agent does, in one line ("Bash: cargo test"); `None` keeps
     /// the previous line while the phase stays the same.
     pub detail: Option<String>,
+    /// A subagent of the session reported it (Claude Code's background
+    /// agents), not the agent the user talks to.
+    pub subagent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +88,8 @@ pub struct SurfaceActivity {
     /// When the current phase began (Unix ms), for "working for 3m".
     pub since_ms: u64,
     pub detail: Option<String>,
+    /// The wait was raised by a subagent: that subagent going on answers it.
+    pub subagent_wait: bool,
 }
 
 #[derive(Debug, Default)]
@@ -138,6 +143,26 @@ impl ActivityStore {
                         (Some(current), Some(next)) => current == next,
                         _ => true,
                     };
+                // A subagent's tool says nothing of the agent the user talks
+                // to: it may wait for its background agents ("Waiting on")
+                // or ask the user something. It only answers a wait that a
+                // subagent raised, which no keypress clears for a question.
+                if event.subagent && phase == AgentPhase::Working {
+                    let Some(current) = self.surfaces.get_mut(&event.tab_id) else {
+                        return false;
+                    };
+                    if !(current.phase.is_waiting() && current.subagent_wait)
+                        || !same_session(&&*current)
+                    {
+                        return false;
+                    }
+                    current.phase = AgentPhase::Working;
+                    current.at_ms = event.at_ms;
+                    current.since_ms = event.at_ms;
+                    current.detail = None;
+                    current.subagent_wait = false;
+                    return true;
+                }
                 // A waiting report that says nothing of its own (Claude Code's
                 // generic "needs your permission" notification, which follows
                 // its PermissionRequest) keeps the wait it joins: its sign (a
@@ -151,6 +176,11 @@ impl ActivityStore {
                         && event.detail.is_none()
                 });
                 let phase = waiting.map_or(phase, |current| current.phase);
+                // A report that joins a wait is part of it, and keeps whose it is.
+                let subagent_wait = waiting
+                    .map_or(event.subagent && phase.is_waiting(), |current| {
+                        current.subagent_wait
+                    });
                 // The same phase of the same session keeps its start and line.
                 let continued =
                     current.filter(|current| current.phase == phase && same_session(current));
@@ -166,6 +196,7 @@ impl ActivityStore {
                     at_ms: event.at_ms,
                     since_ms,
                     detail,
+                    subagent_wait,
                 };
                 let changed = current.is_none_or(|current| {
                     current.phase != next.phase
@@ -243,6 +274,7 @@ impl ActivityStore {
                         at_ms: now_ms,
                         since_ms: since,
                         detail: None,
+                        subagent_wait: false,
                     },
                 );
                 TerminalChange::Started
@@ -272,6 +304,7 @@ impl ActivityStore {
         activity.at_ms = at_ms;
         activity.since_ms = at_ms;
         activity.detail = None;
+        activity.subagent_wait = false;
         true
     }
 
@@ -291,6 +324,7 @@ impl ActivityStore {
                 at_ms: now_ms,
                 since_ms: now_ms,
                 detail: None,
+                subagent_wait: false,
             },
         );
         true
@@ -323,6 +357,7 @@ impl ActivityStore {
                 at_ms: since_ms,
                 since_ms,
                 detail,
+                subagent_wait: false,
             },
         );
         true
@@ -573,6 +608,7 @@ mod tests {
             session_id: session.map(str::to_string),
             at_ms,
             detail: None,
+            subagent: false,
         }
     }
 
@@ -1037,6 +1073,51 @@ mod tests {
         store.retain_tabs(|_| false);
         assert!(store.apply(event("t", Some(AgentPhase::Working), None, 10)));
     }
+    #[test]
+    fn a_subagent_tool_answers_only_a_subagent_wait() {
+        let main = |phase, at_ms, detail: &str| AgentEvent {
+            detail: Some(detail.to_string()),
+            ..event("t", Some(phase), Some("s"), at_ms)
+        };
+        let sub = |phase, at_ms, detail: Option<&str>| AgentEvent {
+            subagent: true,
+            detail: detail.map(str::to_string),
+            ..event("t", Some(phase), Some("s"), at_ms)
+        };
+        let mut store = ActivityStore::default();
+        // The main agent's turn ended while a background agent runs.
+        store.apply(main(AgentPhase::Working, 1, "Waiting on: polling"));
+        assert!(!store.apply(sub(AgentPhase::Working, 2, None)));
+        let current = store.get("t").unwrap();
+        assert_eq!(current.detail.as_deref(), Some("Waiting on: polling"));
+        // The main agent asks: a background agent going on keeps the question.
+        store.apply(main(AgentPhase::NeedsInput, 3, "Which colour?"));
+        assert!(!store.apply(sub(AgentPhase::Working, 4, None)));
+        assert_eq!(store.phase("t"), Some(AgentPhase::NeedsInput));
+        // The background agent asks; once answered it goes on, and that
+        // clears its question.
+        store.apply(main(AgentPhase::Working, 5, "Waiting on: polling"));
+        store.apply(sub(
+            AgentPhase::NeedsInput,
+            6,
+            Some("builder needs your input"),
+        ));
+        assert!(store.get("t").unwrap().subagent_wait);
+        // Its generic follow-up joins the wait and keeps whose it is.
+        store.apply(event("t", Some(AgentPhase::NeedsInput), Some("s"), 7));
+        assert!(store.get("t").unwrap().subagent_wait);
+        assert!(store.apply(sub(AgentPhase::Working, 8, None)));
+        let current = store.get("t").unwrap();
+        assert_eq!(current.phase, AgentPhase::Working);
+        assert!(!current.subagent_wait);
+        // A subagent's tool on a terminal with no entry adds none.
+        assert!(!store.apply(AgentEvent {
+            subagent: true,
+            ..event("u", Some(AgentPhase::Working), Some("s"), 9)
+        }));
+        assert!(store.get("u").is_none());
+    }
+
     #[test]
     fn one_wait_keeps_its_first_sign_and_line() {
         let with = |phase, at_ms, detail: &str| AgentEvent {

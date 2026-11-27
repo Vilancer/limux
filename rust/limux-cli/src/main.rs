@@ -1212,16 +1212,12 @@ async fn run_agent_hook(
     }
 
     if let Some(state) = reading.state {
-        report_agent_activity(
-            client,
-            agent,
-            args,
-            &payload,
-            state.wire_name(),
-            reading.detail,
-            at_ms,
-        )
-        .await;
+        let report = ActivityReport {
+            state: state.wire_name(),
+            detail: reading.detail,
+            subagent: reading.subagent,
+        };
+        report_agent_activity(client, agent, args, &payload, report, at_ms).await;
     }
 
     Ok(provider
@@ -1232,13 +1228,20 @@ async fn run_agent_hook(
 /// Tell the app what the agent in this terminal is doing. Best effort: a
 /// hook outside Limux (no terminal id) or an older app that lacks the method
 /// reports nothing, and the agent is never held up or shown an error.
+/// What one hook reports of the terminal's agent.
+struct ActivityReport {
+    state: &'static str,
+    detail: Option<String>,
+    /// A subagent of the session reported it, not the main agent.
+    subagent: bool,
+}
+
 async fn report_agent_activity(
     client: &mut Client,
     agent: agent_hooks::AgentKind,
     args: &[String],
     payload: &Value,
-    state: &str,
-    detail: Option<String>,
+    report: ActivityReport,
     at_ms: u64,
 ) {
     // An OSC-only hook has no socket to report to.
@@ -1249,31 +1252,33 @@ async fn report_agent_activity(
     let Some(surface) = surface else {
         return;
     };
-    let params = agent_activity_params(agent, payload, state, &surface, at_ms, detail);
+    let params = agent_activity_params(agent, payload, &surface, at_ms, report);
     let _ = call_in_workspace_scope(client, workspace, "agent.activity", params).await;
 }
 
 fn agent_activity_params(
     agent: agent_hooks::AgentKind,
     payload: &Value,
-    state: &str,
     surface: &str,
     at_ms: u64,
-    detail: Option<String>,
+    report: ActivityReport,
 ) -> Value {
     let mut params = json!({
         "surface_id": surface,
         "agent": agent.store_name(),
-        "state": state,
+        "state": report.state,
         "at_ms": at_ms,
     });
+    if report.subagent {
+        params["subagent"] = Value::Bool(true);
+    }
     if let Some(session) = hook_str(
         payload,
         &["session_id", "conversationId", "sessionId", "sessionID"],
     ) {
         params["session_id"] = Value::String(session.to_owned());
     }
-    if let Some(detail) = detail {
+    if let Some(detail) = report.detail {
         params["detail"] = Value::String(detail);
     }
     params
@@ -5205,13 +5210,17 @@ mod cli_arg_tests {
     #[test]
     fn agent_activity_params_name_the_terminal_session_and_time() {
         let payload = json!({"session_id": "abc-123", "hook_event_name": "Stop"});
+        let report = |state, detail: Option<&str>, subagent| ActivityReport {
+            state,
+            detail: detail.map(str::to_string),
+            subagent,
+        };
         let params = agent_activity_params(
             agent_hooks::AgentKind::Claude,
             &payload,
-            "idle",
             "7f0c-tab",
             42,
-            None,
+            report("idle", None, false),
         );
         assert_eq!(
             params,
@@ -5226,13 +5235,22 @@ mod cli_arg_tests {
         let params = agent_activity_params(
             agent_hooks::AgentKind::Claude,
             &json!({}),
-            "working",
             "t",
             1,
-            Some("Bash: ls".to_string()),
+            report("working", Some("Bash: ls"), false),
         );
         assert!(params.get("session_id").is_none());
         assert_eq!(params["detail"], "Bash: ls");
+        // A subagent's report says so; the main agent's leaves the field out.
+        assert!(params.get("subagent").is_none());
+        let params = agent_activity_params(
+            agent_hooks::AgentKind::Claude,
+            &json!({}),
+            "t",
+            1,
+            report("working", None, true),
+        );
+        assert_eq!(params["subagent"], true);
     }
 
     #[test]

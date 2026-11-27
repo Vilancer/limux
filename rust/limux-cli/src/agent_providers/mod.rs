@@ -83,6 +83,9 @@ pub(crate) struct HookReading {
     /// One line of what the agent is doing; `None` keeps the previous one.
     pub(crate) detail: Option<String>,
     pub(crate) notice: Option<Notice>,
+    /// A subagent of the session reported it, not the agent the user talks
+    /// to: its going on answers only a wait that a subagent raised.
+    pub(crate) subagent: bool,
 }
 
 impl HookReading {
@@ -107,6 +110,11 @@ impl HookReading {
 
     fn with_notice(mut self, notice: Notice) -> Self {
         self.notice = Some(notice);
+        self
+    }
+
+    fn by_subagent(mut self, subagent: bool) -> Self {
+        self.subagent = subagent;
         self
     }
 }

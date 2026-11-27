@@ -257,10 +257,13 @@ fn claude_subagent_tools_leave_the_main_agent_state_alone() {
                    "tool_input": {"pattern": "not_text|NUL|control"}}),
         )
     };
-    // Neither "Waiting on" nor a question of the main agent is replaced by
-    // what a background agent runs.
+    // It reports as the subagent's, with no line: Limux keeps "Waiting on"
+    // and a question of the main agent, and clears only a subagent's wait.
     for event in ["post-tool-use", "PostToolUse", "PreToolUse"] {
-        assert_eq!(subagent(event), HookReading::default(), "{event}");
+        let reading = subagent(event);
+        assert_eq!(reading.state, Some(AgentState::Working), "{event}");
+        assert!(reading.subagent, "{event}");
+        assert_eq!(reading.detail, None, "{event}");
     }
     // The main agent's own tools still report.
     let main = read(
@@ -269,6 +272,7 @@ fn claude_subagent_tools_leave_the_main_agent_state_alone() {
         json!({"tool_name": "Grep", "agent_id": "", "tool_input": {"pattern": "fn main"}}),
     );
     assert_eq!(main.state, Some(AgentState::Working));
+    assert!(!main.subagent);
     assert_eq!(main.detail.as_deref(), Some("Grep: fn main"));
     // A subagent that needs permission still needs the user.
     let ask = read(
@@ -277,6 +281,22 @@ fn claude_subagent_tools_leave_the_main_agent_state_alone() {
         json!({"agent_id": "a1b2", "tool_name": "Bash", "tool_input": {"command": "rm -rf build"}}),
     );
     assert_eq!(ask.state, Some(AgentState::NeedsApproval));
+    assert!(ask.subagent);
+    // So does a background agent or worker that asks through a notification.
+    for kind in ["agent_needs_input", "worker_permission_prompt"] {
+        let note = read(
+            Claude,
+            "notification",
+            json!({"notification_type": kind, "message": "builder needs you"}),
+        );
+        assert!(note.subagent, "{kind}");
+    }
+    let note = read(
+        Claude,
+        "notification",
+        json!({"notification_type": "elicitation_dialog", "message": "Claude has a question"}),
+    );
+    assert!(!note.subagent);
 }
 
 #[test]

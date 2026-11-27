@@ -65,9 +65,11 @@ you answer sooner. A question (AskUserQuestion) uses the same dialog, so it is
 told apart by its tool. Codex has no Notification hook: it notifies on
 `PermissionRequest` and `Stop`. OpenCode's plugin skips the events of a
 subagent's child session, whose end is not the end of your session. Likewise,
-a Claude Code subagent's tool hooks (they carry an `agent_id`) leave the
-terminal's state and line alone, and the `idle_prompt` reminder Claude Code
-sends about a minute after a turn ends marks it idle without a second
+a Claude Code subagent's tool hooks (they carry an `agent_id`) are sent with
+`"subagent": true`: they leave the terminal's state and line alone ("Waiting
+on" a background agent, or a question of the main agent) and only clear a wait
+that a subagent raised, once it goes on. The `idle_prompt` reminder Claude
+Code sends about a minute after a turn ends marks it idle without a second
 notification.
 
 Hooks installed by an older Limux lack the newer events, so approvals show

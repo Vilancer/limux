@@ -47,10 +47,11 @@ impl AgentProvider for Claude {
             "UserPromptSubmit" | "prompt-submit" => HookReading::state(AgentState::Working)
                 .with_detail(hook_str(payload, &["prompt"]).map(str::to_owned)),
             // A subagent's tool runs under the main session's id. It says
-            // nothing of the main agent: that one may be idle while the
-            // subagent works ("Waiting on" stays), or waiting on the user.
+            // nothing of the main agent, which may wait for it ("Waiting
+            // on") or ask the user something: Limux lets it answer only a
+            // subagent's own wait, and it adds no line.
             "PreToolUse" | "PostToolUse" | "post-tool-use" if from_subagent(payload) => {
-                HookReading::default()
+                HookReading::state(AgentState::Working).by_subagent(true)
             }
             "PreToolUse" | "PostToolUse" | "post-tool-use" => {
                 HookReading::state(AgentState::Working)
@@ -64,7 +65,8 @@ impl AgentProvider for Claude {
                 }
                 _ => HookReading::state(AgentState::NeedsApproval)
                     .with_detail(payload_tool_detail(payload, |tool| tool)),
-            },
+            }
+            .by_subagent(from_subagent(payload)),
             "SessionEnd" | "session-end" => HookReading::state(AgentState::Ended),
             "SubagentStop" | "subagent-stop" | "Cleanup" | "cleanup" | "restore-exit" => {
                 HookReading::default()
@@ -86,7 +88,10 @@ impl AgentProvider for Claude {
 fn notification(payload: &Value) -> HookReading {
     let message = hook_str(payload, &["message", "notification"]);
     let needs_you = || Notice::NeedsYou(message.unwrap_or("waiting for input").to_owned());
-    let state = match hook_str(payload, &["notification_type", "notificationType"]) {
+    let kind = hook_str(payload, &["notification_type", "notificationType"]);
+    let subagent = from_subagent(payload)
+        || matches!(kind, Some("worker_permission_prompt" | "agent_needs_input"));
+    let state = match kind {
         Some("permission_prompt" | "worker_permission_prompt") => Some(AgentState::NeedsApproval),
         Some("elicitation_dialog" | "elicitation_url_dialog" | "agent_needs_input") => {
             Some(AgentState::NeedsInput)
@@ -126,6 +131,7 @@ fn notification(payload: &Value) -> HookReading {
     }
     .with_detail(detail)
     .with_notice(needs_you())
+    .by_subagent(subagent)
 }
 
 /// Claude Code names the subagent a hook ran in; the main agent's hooks

@@ -335,6 +335,8 @@ pub enum ControlCommand {
         session_id: Option<String>,
         at_ms: u64,
         detail: Option<String>,
+        /// A subagent of the session reported it, not the main agent.
+        subagent: bool,
         reply: mpsc::Sender<BridgeResult>,
     },
 }
@@ -1753,6 +1755,10 @@ fn handle_method(
                         .and_then(Value::as_u64)
                         .unwrap_or_default(),
                     detail: optional_string(params, &["detail"]),
+                    subagent: params
+                        .get("subagent")
+                        .and_then(Value::as_bool)
+                        .unwrap_or_default(),
                     reply,
                 },
                 rx,
@@ -2902,9 +2908,11 @@ mod tests {
                     session_id,
                     at_ms,
                     detail,
+                    subagent,
                     reply,
                 } => {
                     assert_eq!(detail, None);
+                    assert!(!subagent);
                     assert_eq!(target, WorkspaceTarget::Name("codex".to_string()));
                     assert_eq!(surface_hint, "tab-1");
                     assert_eq!(agent, "claude");
