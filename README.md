@@ -488,7 +488,9 @@ project rows and on terminal tabs.
   `1`-`9`, focuses that terminal without expanding its group. `Delete` closes
   the selected finished or quiet one from the lists. **Mark all read** clears
   unread marks only (those terminals stay as quiet); a waiting terminal stays
-  until the agent continues. **Close quiet** closes every quiet one. Quiet
+  until the agent continues. **Close quiet** closes every quiet one, except
+  one whose agent wakes up on its own (it lists "Background: cargo test" or
+  "Wakes at 09:05"). It only removes rows: no terminal or command stops. Quiet
   terminals are listed but not counted. With nothing to list it explains the
   signs.
 - Under a project with one working or waiting terminal, a line says what it

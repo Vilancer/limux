@@ -6927,6 +6927,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
             at_ms,
             detail,
             subagent,
+            background,
             reply,
         } => {
             let _ = reply.send(agent_activity_ui::handle_agent_activity(
@@ -6941,6 +6942,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                     at_ms,
                     detail,
                     subagent,
+                    background,
                 },
             ));
         }

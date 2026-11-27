@@ -2,7 +2,10 @@
 
 use serde_json::Value;
 
-use super::{finished, payload_tool_detail, AgentProvider, AgentState, HookReading, Notice};
+use super::{
+    finished, last_said, payload_tool_detail, AgentProvider, AgentState, HookReading, Notice,
+    TITLE_CHARS,
+};
 use crate::hook_str;
 
 pub(super) struct Claude;
@@ -26,18 +29,7 @@ impl AgentProvider for Claude {
     fn read(&self, event: &str, payload: &Value) -> HookReading {
         match event {
             "Notification" | "notification" => notification(payload),
-            "Stop" | "stop" => match running_subagents(payload).as_slice() {
-                // It wakes up on its own when they finish: not done yet.
-                [] => HookReading::state(AgentState::Idle).with_notice(finished(
-                    payload,
-                    &["last_assistant_message"],
-                    &["message", "reason"],
-                )),
-                [one] => HookReading::state(AgentState::Working)
-                    .with_detail(Some(format!("Waiting on: {one}"))),
-                many => HookReading::state(AgentState::Working)
-                    .with_detail(Some(format!("Waiting on {} background agents", many.len()))),
-            },
+            "Stop" | "stop" => stop(payload),
             "finished" => HookReading::notice(finished(
                 payload,
                 &["last_assistant_message"],
@@ -150,19 +142,96 @@ fn first_question(payload: &Value) -> Option<String> {
     hook_str(question, &["question", "header"]).map(str::to_owned)
 }
 
-/// Subagents of a Claude Code session that still run when its turn ends. It
-/// wakes up on its own when they finish, so the turn's end is not the end
-/// of the work. Background shell commands do not count: a server never ends.
-pub(super) fn running_subagents(payload: &Value) -> Vec<&str> {
-    payload
-        .get("background_tasks")
+/// The end of a turn. Claude Code lists the work still in flight
+/// (`background_tasks`) and the wake-ups it has scheduled (`session_crons`):
+/// it wakes up on its own when any of it ends or fires, so the turn's end is
+/// not always the end of the work.
+fn stop(payload: &Value) -> HookReading {
+    let said = || last_said(payload, &["last_assistant_message"], &["message", "reason"]);
+    let (agents, commands) = in_flight(payload);
+    match (agents.as_slice(), commands.as_slice()) {
+        // Background agents report back soon: it keeps working.
+        ([one], _) => {
+            HookReading::state(AgentState::Working).with_detail(Some(format!("Waiting on: {one}")))
+        }
+        ([_, _, ..], _) => HookReading::state(AgentState::Working).with_detail(Some(format!(
+            "Waiting on {} background agents",
+            agents.len()
+        ))),
+        // A command or a monitor may run for hours (a server never ends), so
+        // it is quiet, but says what it waits on and is not "finished".
+        ([], [one]) => HookReading::state(AgentState::Idle)
+            .in_background()
+            .with_detail(Some(format!("Background: {one}")))
+            .with_notice(Notice::WaitingOn {
+                on: crate::one_line(one, TITLE_CHARS),
+                said: said(),
+            }),
+        ([], [_, _, ..]) => {
+            let on = format!("{} background commands", commands.len());
+            HookReading::state(AgentState::Idle)
+                .in_background()
+                .with_detail(Some(format!("Background: {on}")))
+                .with_notice(Notice::WaitingOn { on, said: said() })
+        }
+        ([], []) => {
+            let done = HookReading::state(AgentState::Idle).with_notice(finished(
+                payload,
+                &["last_assistant_message"],
+                &["message", "reason"],
+            ));
+            match wake_up(payload) {
+                Some(when) => done.in_background().with_detail(Some(when)),
+                None => done,
+            }
+        }
+    }
+}
+
+/// The session's work still in flight (running or pending): background
+/// agents and the like, then commands and monitors (shells, which may never
+/// end). Each named by its description, else its command.
+fn in_flight(payload: &Value) -> (Vec<&str>, Vec<&str>) {
+    let mut agents = Vec::new();
+    let mut commands = Vec::new();
+    let tasks = payload.get("background_tasks").and_then(Value::as_array);
+    for task in tasks.into_iter().flatten() {
+        if !matches!(hook_str(task, &["status"]), Some("running" | "pending")) {
+            continue;
+        }
+        match hook_str(task, &["type"]) {
+            Some("shell" | "monitor") => commands.push(
+                hook_str(task, &["description", "command"]).unwrap_or("a background command"),
+            ),
+            _ => agents.push(hook_str(task, &["description"]).unwrap_or("background agent")),
+        }
+    }
+    (agents, commands)
+}
+
+/// When a scheduled wake-up (ScheduleWakeup, CronCreate, /loop) brings the
+/// session back: "Wakes at 14:30" for a one-shot whose cron names a time of
+/// day, else "Wakes on a schedule".
+fn wake_up(payload: &Value) -> Option<String> {
+    let crons = payload
+        .get("session_crons")
         .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|task| {
-            hook_str(task, &["status"]) == Some("running")
-                && hook_str(task, &["type"]).is_some_and(|kind| kind != "shell")
-        })
-        .map(|task| hook_str(task, &["description"]).unwrap_or("background agent"))
-        .collect()
+        .filter(|crons| !crons.is_empty())?;
+    let at = crons
+        .iter()
+        .filter(|cron| cron.get("recurring").and_then(Value::as_bool) == Some(false))
+        .find_map(|cron| hook_str(cron, &["schedule"]).and_then(time_of_day));
+    Some(at.map_or_else(
+        || "Wakes on a schedule".to_owned(),
+        |(hour, minute)| format!("Wakes at {hour:02}:{minute:02}"),
+    ))
+}
+
+/// The time of day of a cron expression whose minute and hour are plain
+/// numbers ("30 14 27 11 *").
+fn time_of_day(schedule: &str) -> Option<(u8, u8)> {
+    let mut fields = schedule.split_whitespace();
+    let minute: u8 = fields.next()?.parse().ok()?;
+    let hour: u8 = fields.next()?.parse().ok()?;
+    (minute < 60 && hour < 24).then_some((hour, minute))
 }

@@ -55,6 +55,9 @@ pub(crate) enum Notice {
     NeedsYou(String),
     /// "Codex finished", with what it last said.
     Finished(String),
+    /// "Claude is waiting on cargo test": the turn ended, but the agent wakes
+    /// up on its own once that background work ends. With what it last said.
+    WaitingOn { on: String, said: String },
     /// "Antigravity failed", with the error.
     Failed(String),
     /// "Codex", with a message the agent chose to send.
@@ -68,6 +71,7 @@ impl Notice {
         match self {
             Self::NeedsYou(body) => (format!("{label} needs you"), body),
             Self::Finished(body) => (format!("{label} finished"), body),
+            Self::WaitingOn { on, said } => (format!("{label} is waiting on {on}"), said),
             Self::Failed(body) => (format!("{label} failed"), body),
             Self::Note(body) => (label.to_string(), body),
             Self::Event { event, message } => (format!("{label}: {event}"), message),
@@ -86,6 +90,9 @@ pub(crate) struct HookReading {
     /// A subagent of the session reported it, not the agent the user talks
     /// to: its going on answers only a wait that a subagent raised.
     pub(crate) subagent: bool,
+    /// Idle, but it wakes up on its own (background commands, a scheduled
+    /// wake-up): not done with what it was asked.
+    pub(crate) background: bool,
 }
 
 impl HookReading {
@@ -115,6 +122,11 @@ impl HookReading {
 
     fn by_subagent(mut self, subagent: bool) -> Self {
         self.subagent = subagent;
+        self
+    }
+
+    fn in_background(mut self) -> Self {
+        self.background = true;
         self
     }
 }
@@ -168,16 +180,21 @@ pub(crate) fn provider(agent: AgentKind) -> &'static dyn AgentProvider {
 const DETAIL_CHARS: usize = 80;
 /// How long a notification's text may be.
 const NOTICE_CHARS: usize = 140;
+/// How long what a notification's title names may be.
+const TITLE_CHARS: usize = 48;
 
 /// The notice for a finished turn: the first line of what the agent last
 /// said (it tells the tasks apart), else `fallback` keys, else "task complete".
 fn finished(payload: &Value, message_keys: &[&str], fallback_keys: &[&str]) -> Notice {
-    let body = hook_str(payload, message_keys)
+    Notice::Finished(last_said(payload, message_keys, fallback_keys))
+}
+
+fn last_said(payload: &Value, message_keys: &[&str], fallback_keys: &[&str]) -> String {
+    hook_str(payload, message_keys)
         .map(|message| one_line(&plain_text(message), NOTICE_CHARS))
         .filter(|line| !line.is_empty())
         .or_else(|| hook_str(payload, fallback_keys).map(str::to_owned))
-        .unwrap_or_else(|| "task complete".to_owned());
-    Notice::Finished(body)
+        .unwrap_or_else(|| "task complete".to_owned())
 }
 
 /// The notice for an approval the agent waits for, naming what it asks to run.

@@ -175,15 +175,17 @@ fn claude_notifies_once_the_main_agent_is_done_with_what_it_said() {
         reading.detail.as_deref(),
         Some("Waiting on: Reply with pong")
     );
-    // Only a background shell command left (it may never end): done.
+    // Nothing left in flight (a finished command does not count): done.
     let done = json!({
         "last_assistant_message": "\nThe **sidebar** fix is in `window.rs`.\nMore detail.",
         "background_tasks": [
-            {"id": "b1", "type": "shell", "status": "running", "description": "dev server"},
+            {"id": "b1", "type": "shell", "status": "completed", "description": "cargo test"},
         ],
+        "session_crons": [],
     });
     let reading = read(Claude, "stop", done);
     assert_eq!(reading.state, Some(AgentState::Idle));
+    assert!(!reading.background);
     assert_eq!(
         reading.notice.map(|notice| notice.title_body("Claude")),
         Some((
@@ -226,6 +228,75 @@ fn claude_notifies_once_the_main_agent_is_done_with_what_it_said() {
         .map(|notice| notice.title_body("Claude")),
         Some(("Claude".to_string(), "Build is green".to_string()))
     );
+}
+
+#[test]
+fn claude_waiting_on_background_work_is_quiet_but_not_finished() {
+    use AgentKind::Claude;
+    let stop = |tasks: Value, crons: Value| {
+        read(
+            Claude,
+            "stop",
+            json!({"last_assistant_message": "Started the tests; I'll check them when they end.",
+                   "background_tasks": tasks, "session_crons": crons}),
+        )
+    };
+    // A command it waits on (or a server: it cannot tell): quiet, named,
+    // and the notification says it waits instead of "finished".
+    let reading = stop(
+        json!([{"id": "b1", "type": "shell", "status": "running",
+                "description": "Run the tests", "command": "cargo test --workspace"}]),
+        json!([]),
+    );
+    assert_eq!(reading.state, Some(AgentState::Idle));
+    assert!(reading.background);
+    assert_eq!(reading.detail.as_deref(), Some("Background: Run the tests"));
+    assert_eq!(
+        reading.notice.map(|notice| notice.title_body("Claude")),
+        Some((
+            "Claude is waiting on Run the tests".to_string(),
+            "Started the tests; I'll check them when they end.".to_string()
+        ))
+    );
+    // No description: the command. Two commands, or a monitor, count too.
+    let reading = stop(
+        json!([{"id": "b1", "type": "shell", "status": "pending", "command": "npm run dev"}]),
+        json!([]),
+    );
+    assert_eq!(reading.detail.as_deref(), Some("Background: npm run dev"));
+    let reading = stop(
+        json!([{"id": "b1", "type": "shell", "status": "running", "command": "npm run dev"},
+               {"id": "m1", "type": "monitor", "status": "running", "description": "CI"}]),
+        json!([]),
+    );
+    assert_eq!(
+        reading.detail.as_deref(),
+        Some("Background: 2 background commands")
+    );
+    assert!(reading.background);
+    // A pending background agent keeps it working like a running one.
+    let reading = stop(
+        json!([{"id": "a1", "type": "subagent", "status": "pending", "description": "Review"},
+               {"id": "b1", "type": "shell", "status": "running", "command": "npm run dev"}]),
+        json!([]),
+    );
+    assert_eq!(reading.state, Some(AgentState::Working));
+    assert_eq!(reading.detail.as_deref(), Some("Waiting on: Review"));
+    assert_eq!(reading.notice, None);
+    // A scheduled wake-up: finished for now, quiet, and says when it is back.
+    let reading = stop(
+        json!([]),
+        json!([{"id": "c1", "schedule": "5 9 27 11 *", "recurring": false, "prompt": "check CI"}]),
+    );
+    assert_eq!(reading.state, Some(AgentState::Idle));
+    assert!(reading.background);
+    assert_eq!(reading.detail.as_deref(), Some("Wakes at 09:05"));
+    assert!(matches!(reading.notice, Some(Notice::Finished(_))));
+    let reading = stop(
+        json!([]),
+        json!([{"id": "c1", "schedule": "*/10 * * * *", "recurring": true, "prompt": "/loop"}]),
+    );
+    assert_eq!(reading.detail.as_deref(), Some("Wakes on a schedule"));
 }
 
 #[test]

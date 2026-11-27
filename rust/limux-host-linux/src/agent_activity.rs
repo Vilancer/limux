@@ -77,6 +77,9 @@ pub struct AgentEvent {
     /// A subagent of the session reported it (Claude Code's background
     /// agents), not the agent the user talks to.
     pub subagent: bool,
+    /// Idle, but it wakes up on its own: work still runs in the background
+    /// (a command it waits on) or a wake-up is scheduled.
+    pub background: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +93,8 @@ pub struct SurfaceActivity {
     pub detail: Option<String>,
     /// The wait was raised by a subagent: that subagent going on answers it.
     pub subagent_wait: bool,
+    /// Quiet, but it wakes up on its own (see [`AgentEvent::background`]).
+    pub background: bool,
 }
 
 #[derive(Debug, Default)]
@@ -161,6 +166,7 @@ impl ActivityStore {
                     current.since_ms = event.at_ms;
                     current.detail = None;
                     current.subagent_wait = false;
+                    current.background = false;
                     return true;
                 }
                 // A waiting report that says nothing of its own (Claude Code's
@@ -181,9 +187,14 @@ impl ActivityStore {
                     .map_or(event.subagent && phase.is_waiting(), |current| {
                         current.subagent_wait
                     });
-                // The same phase of the same session keeps its start and line.
-                let continued =
-                    current.filter(|current| current.phase == phase && same_session(current));
+                // The same phase of the same session keeps its start and line,
+                // but a turn that no longer waits on background work does not
+                // keep the line that named it.
+                let continued = current.filter(|current| {
+                    current.phase == phase
+                        && same_session(current)
+                        && current.background == event.background
+                });
                 let detail = waiting
                     .and_then(|current| current.detail.clone())
                     .or(event.detail)
@@ -197,11 +208,13 @@ impl ActivityStore {
                     since_ms,
                     detail,
                     subagent_wait,
+                    background: event.background && phase == AgentPhase::Idle,
                 };
                 let changed = current.is_none_or(|current| {
                     current.phase != next.phase
                         || current.agent != next.agent
                         || current.detail != next.detail
+                        || current.background != next.background
                 });
                 self.surfaces.insert(event.tab_id, next);
                 changed
@@ -230,11 +243,12 @@ impl ActivityStore {
         self.surfaces.is_empty()
     }
 
-    /// Tabs listed as idle, for closing them all at once.
+    /// Tabs listed as idle, for closing them all at once. One that wakes up
+    /// on its own (background work, a scheduled wake-up) is not done.
     pub fn idle_tabs(&self) -> Vec<String> {
         self.surfaces
             .iter()
-            .filter(|(_, activity)| activity.phase == AgentPhase::Idle)
+            .filter(|(_, activity)| activity.phase == AgentPhase::Idle && !activity.background)
             .map(|(tab_id, _)| tab_id.clone())
             .collect()
     }
@@ -275,6 +289,7 @@ impl ActivityStore {
                         since_ms: since,
                         detail: None,
                         subagent_wait: false,
+                        background: false,
                     },
                 );
                 TerminalChange::Started
@@ -305,6 +320,7 @@ impl ActivityStore {
         activity.since_ms = at_ms;
         activity.detail = None;
         activity.subagent_wait = false;
+        activity.background = false;
         true
     }
 
@@ -325,6 +341,7 @@ impl ActivityStore {
                 since_ms: now_ms,
                 detail: None,
                 subagent_wait: false,
+                background: false,
             },
         );
         true
@@ -358,6 +375,7 @@ impl ActivityStore {
                 since_ms,
                 detail,
                 subagent_wait: false,
+                background: false,
             },
         );
         true
@@ -609,6 +627,7 @@ mod tests {
             at_ms,
             detail: None,
             subagent: false,
+            background: false,
         }
     }
 
@@ -1073,6 +1092,39 @@ mod tests {
         store.retain_tabs(|_| false);
         assert!(store.apply(event("t", Some(AgentPhase::Working), None, 10)));
     }
+    #[test]
+    fn a_turn_paused_on_background_work_stays_out_of_close_quiet() {
+        let paused = |at_ms, detail: &str| AgentEvent {
+            background: true,
+            detail: Some(detail.to_string()),
+            ..event("t", Some(AgentPhase::Idle), Some("s"), at_ms)
+        };
+        let mut store = ActivityStore::default();
+        store.apply(event("t", Some(AgentPhase::Working), Some("s"), 1));
+        assert!(store.apply(paused(2, "Background: cargo test")));
+        store.apply(event("done", Some(AgentPhase::Idle), Some("d"), 2));
+        let current = store.get("t").unwrap();
+        assert_eq!(current.phase, AgentPhase::Idle);
+        assert!(current.background);
+        assert_eq!(current.detail.as_deref(), Some("Background: cargo test"));
+        assert_eq!(store.idle_tabs(), ["done"]);
+        // It wakes up and ends its turn for good: done, and the line that
+        // named the command goes with it.
+        assert!(store.apply(event("t", Some(AgentPhase::Idle), Some("s"), 3)));
+        let current = store.get("t").unwrap();
+        assert!(!current.background);
+        assert_eq!(current.detail, None);
+        let mut idle = store.idle_tabs();
+        idle.sort_unstable();
+        assert_eq!(idle, ["done", "t"]);
+        // Only an idle report pauses: a working one never carries it over.
+        store.apply(AgentEvent {
+            background: true,
+            ..event("t", Some(AgentPhase::Working), Some("s"), 4)
+        });
+        assert!(!store.get("t").unwrap().background);
+    }
+
     #[test]
     fn a_subagent_tool_answers_only_a_subagent_wait() {
         let main = |phase, at_ms, detail: &str| AgentEvent {

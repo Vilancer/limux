@@ -161,17 +161,24 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                             }),
                     )
                 } else if !tab.unread {
+                    // Paused on background work: what it waits on, which is
+                    // why Close quiet leaves it.
+                    let background = activity
+                        .filter(|activity| activity.background)
+                        .and_then(|activity| activity.detail.clone());
                     (
                         PendingKind::Quiet,
                         activity.map_or(0, |activity| activity.since_ms),
-                        note.map(|(text, _)| text.clone()).unwrap_or_else(|| {
-                            if plain {
-                                "Quiet"
-                            } else {
-                                "Waiting for a prompt"
-                            }
-                            .to_string()
-                        }),
+                        background
+                            .or_else(|| note.map(|(text, _)| text.clone()))
+                            .unwrap_or_else(|| {
+                                if plain {
+                                    "Quiet"
+                                } else {
+                                    "Waiting for a prompt"
+                                }
+                                .to_string()
+                            }),
                     )
                 } else {
                     (

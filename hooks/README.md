@@ -72,6 +72,15 @@ that a subagent raised, once it goes on. The `idle_prompt` reminder Claude
 Code sends about a minute after a turn ends marks it idle without a second
 notification.
 
+When a Claude Code turn ends (`Stop`), the work still in flight decides what it
+shows. A running or pending background agent keeps it working ("Waiting on:
+Review"). Only commands or monitors left: it is quiet, as one may be a server
+that never ends, with the line "Background: Run the tests", sent with
+`"background": true`, and the notification says "Claude is waiting on Run the
+tests" instead of "finished". A scheduled wake-up (`session_crons`) gives
+"Wakes at 09:05" (or "Wakes on a schedule") with the usual notification. A
+quiet terminal that wakes up on its own is left out of **Close quiet**.
+
 Hooks installed by an older Limux lack the newer events, so approvals show
 late and a request you approved keeps showing as waiting until the turn ends.
 Run `limux hooks setup <agent>` again to add them (for Claude, once per config

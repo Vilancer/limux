@@ -1216,6 +1216,7 @@ async fn run_agent_hook(
             state: state.wire_name(),
             detail: reading.detail,
             subagent: reading.subagent,
+            background: reading.background,
         };
         report_agent_activity(client, agent, args, &payload, report, at_ms).await;
     }
@@ -1234,6 +1235,8 @@ struct ActivityReport {
     detail: Option<String>,
     /// A subagent of the session reported it, not the main agent.
     subagent: bool,
+    /// Idle, but it wakes up on its own (background work, a scheduled wake-up).
+    background: bool,
 }
 
 async fn report_agent_activity(
@@ -1271,6 +1274,9 @@ fn agent_activity_params(
     });
     if report.subagent {
         params["subagent"] = Value::Bool(true);
+    }
+    if report.background {
+        params["background"] = Value::Bool(true);
     }
     if let Some(session) = hook_str(
         payload,
@@ -5214,6 +5220,7 @@ mod cli_arg_tests {
             state,
             detail: detail.map(str::to_string),
             subagent,
+            background: false,
         };
         let params = agent_activity_params(
             agent_hooks::AgentKind::Claude,
@@ -5251,6 +5258,18 @@ mod cli_arg_tests {
             report("working", None, true),
         );
         assert_eq!(params["subagent"], true);
+        assert!(params.get("background").is_none());
+        let params = agent_activity_params(
+            agent_hooks::AgentKind::Claude,
+            &json!({}),
+            "t",
+            1,
+            ActivityReport {
+                background: true,
+                ..report("idle", Some("Background: cargo test"), false)
+            },
+        );
+        assert_eq!(params["background"], true);
     }
 
     #[test]

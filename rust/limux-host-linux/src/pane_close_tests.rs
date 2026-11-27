@@ -1894,6 +1894,7 @@ fn pending_panel_works_with_both_bars_hidden() {
             at_ms: crate::agent_activity::now_ms(),
             detail: Some("Bash: cargo test".to_string()),
             subagent: false,
+            background: false,
         },
     )
     .unwrap();
@@ -2002,6 +2003,7 @@ fn quitting_an_agent_does_not_list_its_shell() {
             at_ms: crate::agent_activity::now_ms(),
             detail: None,
             subagent: false,
+            background: false,
         },
     )
     .unwrap();
@@ -2257,6 +2259,7 @@ fn session_rows_list_terminals_as_tabs() {
             at_ms: crate::agent_activity::now_ms(),
             detail: Some("Bash: cargo test".to_string()),
             subagent: false,
+            background: false,
         },
     )
     .unwrap();
@@ -2364,6 +2367,7 @@ fn report(
             at_ms: crate::agent_activity::now_ms(),
             detail: (!detail.is_empty()).then(|| detail.to_string()),
             subagent: false,
+            background: false,
         },
     )
     .unwrap();
