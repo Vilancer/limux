@@ -1392,17 +1392,23 @@ enum AgentHookPersistenceAction {
 fn agent_hook_persistence_action(event: &str, payload: &Value) -> AgentHookPersistenceAction {
     match event {
         "Cleanup" | "cleanup" | "restore-exit" => AgentHookPersistenceAction::Remove,
-        // The user quit the agent (Claude Code: /exit, Ctrl+C twice, Ctrl+D) or
-        // logged out: don't bring it back on the next start. Every other end
-        // (Limux closing and signalling it, a crash) keeps it restorable.
-        "SessionEnd" | "session-end" if session_end_is_user_exit(payload) => {
-            AgentHookPersistenceAction::Remove
+        // The user quit the agent or logged out: don't bring it back on the
+        // next start. Every other end (Limux closing and signalling it, a
+        // crash) keeps it restorable.
+        "SessionEnd" | "session-end" => {
+            if session_end_is_user_exit(payload) {
+                AgentHookPersistenceAction::Remove
+            } else {
+                AgentHookPersistenceAction::Preserve
+            }
         }
-        "SessionEnd" | "session-end" => AgentHookPersistenceAction::Preserve,
         _ => AgentHookPersistenceAction::Upsert,
     }
 }
 
+/// Claude Code's `SessionEnd` reasons for /exit, Ctrl+C twice or Ctrl+D, and
+/// /logout. Gemini reports "exit" for every shutdown, signals included, and
+/// Codex sends no reason, so neither can tell a user exit apart.
 fn session_end_is_user_exit(payload: &Value) -> bool {
     matches!(
         hook_str(payload, &["reason"]),

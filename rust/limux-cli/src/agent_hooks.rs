@@ -207,6 +207,35 @@ impl AgentHookSessionStore {
                 .as_ref()
                 .and_then(|record| normalized(&record.surface_id))
         });
+        if let (Some(removed), Some(surface_id)) = (&removed, &surface_id) {
+            // An older session that ran in this terminal (before /clear, a
+            // crash) was replaced by this one: it ends here too, or the next
+            // start would restore it in place of the one that just ended.
+            let target_tab = tab_identity(surface_id);
+            let replaced: Vec<AgentHookSessionRecord> = file
+                .sessions
+                .values()
+                .filter(|record| {
+                    !target_tab.is_empty()
+                        && tab_identity(&record.surface_id) == target_tab
+                        && record.updated_at <= removed.updated_at
+                })
+                .cloned()
+                .collect();
+            for record in replaced {
+                file.sessions.remove(&record.session_id);
+                file.ended_sessions.retain(|ended| {
+                    ended.session_id != record.session_id
+                        || tab_identity(&ended.surface_id) != target_tab
+                });
+                file.ended_sessions.push(EndedAgentHookSession {
+                    session_id: record.session_id,
+                    workspace_id: record.workspace_id,
+                    surface_id: record.surface_id,
+                    updated_at: now,
+                });
+            }
+        }
         if let Some(surface_id) = surface_id {
             file.ended_sessions.retain(|ended| {
                 ended.session_id != session_id
@@ -763,6 +792,43 @@ mod tests {
             serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
         assert_eq!(json["ended_sessions"][0]["session_id"], "ended");
         assert_eq!(json["ended_sessions"][0]["surface_id"], "1:ended");
+    }
+
+    #[test]
+    fn removing_a_session_ends_the_older_ones_it_replaced_in_that_terminal() {
+        let dir = tempdir().unwrap();
+        let store = AgentHookSessionStore::new_for_dir("claude", dir.path());
+        let at = |session_id: &str, surface_id: &str, updated_at: f64| AgentHookSessionRecord {
+            surface_id: surface_id.to_string(),
+            updated_at,
+            ..test_record(session_id)
+        };
+        // A ran in the tab, then /clear started B there. Another tab runs C,
+        // and D started in the same tab after B (it is not B's to end).
+        let records = [
+            at("A", "1:tab", 10.0),
+            at("B", "2:tab", 20.0),
+            at("C", "1:other", 5.0),
+            at("D", "1:tab", 30.0),
+        ];
+        for record in &records {
+            store
+                .update(&record.session_id, |_| record.clone())
+                .unwrap();
+        }
+
+        store.remove("B", Some("workspace"), Some("1:tab")).unwrap();
+
+        let file = store.load().unwrap();
+        let live: Vec<&str> = file.sessions.keys().map(String::as_str).collect();
+        assert_eq!(live, ["C", "D"]);
+        let mut ended: Vec<&str> = file
+            .ended_sessions
+            .iter()
+            .map(|ended| ended.session_id.as_str())
+            .collect();
+        ended.sort_unstable();
+        assert_eq!(ended, ["A", "B"]);
     }
 
     #[test]
