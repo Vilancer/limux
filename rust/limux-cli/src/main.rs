@@ -1389,12 +1389,25 @@ enum AgentHookPersistenceAction {
     Remove,
 }
 
-fn agent_hook_persistence_action(event: &str) -> AgentHookPersistenceAction {
+fn agent_hook_persistence_action(event: &str, payload: &Value) -> AgentHookPersistenceAction {
     match event {
         "Cleanup" | "cleanup" | "restore-exit" => AgentHookPersistenceAction::Remove,
+        // The user quit the agent (Claude Code: /exit, Ctrl+C twice, Ctrl+D) or
+        // logged out: don't bring it back on the next start. Every other end
+        // (Limux closing and signalling it, a crash) keeps it restorable.
+        "SessionEnd" | "session-end" if session_end_is_user_exit(payload) => {
+            AgentHookPersistenceAction::Remove
+        }
         "SessionEnd" | "session-end" => AgentHookPersistenceAction::Preserve,
         _ => AgentHookPersistenceAction::Upsert,
     }
+}
+
+fn session_end_is_user_exit(payload: &Value) -> bool {
+    matches!(
+        hook_str(payload, &["reason"]),
+        Some("prompt_input_exit" | "logout")
+    )
 }
 
 fn hook_additional_context(payload: &Value) -> Option<String> {
@@ -1439,7 +1452,7 @@ fn persist_agent_hook_session(
     };
 
     let store = agent_hooks::AgentHookSessionStore::new(agent);
-    match agent_hook_persistence_action(event) {
+    match agent_hook_persistence_action(event, payload) {
         AgentHookPersistenceAction::Remove => {
             let (workspace_id, surface_id) =
                 agent_hook_cleanup_scope(args, payload, limux_env_value);
@@ -5600,24 +5613,47 @@ mod cli_arg_tests {
 
     #[test]
     fn external_session_end_preserves_restorable_hook_session() {
-        assert_eq!(
-            agent_hook_persistence_action("SessionEnd"),
-            AgentHookPersistenceAction::Preserve
-        );
-        assert_eq!(
-            agent_hook_persistence_action("session-end"),
-            AgentHookPersistenceAction::Preserve
-        );
+        // Limux closing signals the agent: Claude Code ends with "other",
+        // Gemini with "exit", Codex with no reason. All stay restorable.
+        for payload in [
+            json!({}),
+            json!({"reason": "other"}),
+            json!({"reason": "exit"}),
+            json!({"reason": "clear"}),
+            json!({"reason": "resume"}),
+        ] {
+            for event in ["SessionEnd", "session-end"] {
+                assert_eq!(
+                    agent_hook_persistence_action(event, &payload),
+                    AgentHookPersistenceAction::Preserve,
+                    "{event} {payload}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn session_end_the_user_asked_for_removes_restorable_hook_session() {
+        for reason in ["prompt_input_exit", "logout"] {
+            let payload = json!({"hook_event_name": "SessionEnd", "reason": reason});
+            for event in ["SessionEnd", "session-end"] {
+                assert_eq!(
+                    agent_hook_persistence_action(event, &payload),
+                    AgentHookPersistenceAction::Remove,
+                    "{event} {reason}"
+                );
+            }
+        }
     }
 
     #[test]
     fn internal_cleanup_removes_restorable_hook_session() {
         assert_eq!(
-            agent_hook_persistence_action("cleanup"),
+            agent_hook_persistence_action("cleanup", &json!({})),
             AgentHookPersistenceAction::Remove
         );
         assert_eq!(
-            agent_hook_persistence_action("restore-exit"),
+            agent_hook_persistence_action("restore-exit", &json!({})),
             AgentHookPersistenceAction::Remove
         );
     }
