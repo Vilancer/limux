@@ -90,9 +90,10 @@ pub(crate) struct HookReading {
     /// A subagent of the session reported it, not the agent the user talks
     /// to: its going on answers only a wait that a subagent raised.
     pub(crate) subagent: bool,
-    /// Idle, but it wakes up on its own (background commands, a scheduled
-    /// wake-up): not done with what it was asked.
-    pub(crate) background: bool,
+    /// Whether an idle agent wakes up on its own (background commands, a
+    /// scheduled wake-up): `Some` at the end of a turn, which knows; `None`
+    /// keeps what the terminal had (Claude Code's idle reminder).
+    pub(crate) background: Option<bool>,
 }
 
 impl HookReading {
@@ -125,8 +126,8 @@ impl HookReading {
         self
     }
 
-    fn in_background(mut self) -> Self {
-        self.background = true;
+    fn in_background(mut self, background: bool) -> Self {
+        self.background = Some(background);
         self
     }
 }

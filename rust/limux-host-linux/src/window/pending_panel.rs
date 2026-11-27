@@ -166,19 +166,18 @@ fn pending_entries(state: &State) -> Vec<PendingEntry> {
                     let background = activity
                         .filter(|activity| activity.background)
                         .and_then(|activity| activity.detail.clone());
+                    let fallback = if plain {
+                        "Quiet"
+                    } else {
+                        "Waiting for a prompt"
+                    };
+                    let message = background
+                        .or_else(|| note.map(|(text, _)| text.clone()))
+                        .unwrap_or_else(|| fallback.to_string());
                     (
                         PendingKind::Quiet,
                         activity.map_or(0, |activity| activity.since_ms),
-                        background
-                            .or_else(|| note.map(|(text, _)| text.clone()))
-                            .unwrap_or_else(|| {
-                                if plain {
-                                    "Quiet"
-                                } else {
-                                    "Waiting for a prompt"
-                                }
-                                .to_string()
-                            }),
+                        message,
                     )
                 } else {
                     (

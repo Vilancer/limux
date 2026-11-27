@@ -185,7 +185,7 @@ fn claude_notifies_once_the_main_agent_is_done_with_what_it_said() {
     });
     let reading = read(Claude, "stop", done);
     assert_eq!(reading.state, Some(AgentState::Idle));
-    assert!(!reading.background);
+    assert_eq!(reading.background, Some(false));
     assert_eq!(
         reading.notice.map(|notice| notice.title_body("Claude")),
         Some((
@@ -249,7 +249,7 @@ fn claude_waiting_on_background_work_is_quiet_but_not_finished() {
         json!([]),
     );
     assert_eq!(reading.state, Some(AgentState::Idle));
-    assert!(reading.background);
+    assert_eq!(reading.background, Some(true));
     assert_eq!(reading.detail.as_deref(), Some("Background: Run the tests"));
     assert_eq!(
         reading.notice.map(|notice| notice.title_body("Claude")),
@@ -273,7 +273,7 @@ fn claude_waiting_on_background_work_is_quiet_but_not_finished() {
         reading.detail.as_deref(),
         Some("Background: 2 background commands")
     );
-    assert!(reading.background);
+    assert_eq!(reading.background, Some(true));
     // A pending background agent keeps it working like a running one.
     let reading = stop(
         json!([{"id": "a1", "type": "subagent", "status": "pending", "description": "Review"},
@@ -289,7 +289,7 @@ fn claude_waiting_on_background_work_is_quiet_but_not_finished() {
         json!([{"id": "c1", "schedule": "5 9 27 11 *", "recurring": false, "prompt": "check CI"}]),
     );
     assert_eq!(reading.state, Some(AgentState::Idle));
-    assert!(reading.background);
+    assert_eq!(reading.background, Some(true));
     assert_eq!(reading.detail.as_deref(), Some("Wakes at 09:05"));
     assert!(matches!(reading.notice, Some(Notice::Finished(_))));
     let reading = stop(
@@ -313,6 +313,8 @@ fn claude_idle_reminder_sets_idle_without_a_second_notice() {
         let reading = read(Claude, "notification", payload.clone());
         assert_eq!(reading.state, Some(AgentState::Idle), "{payload}");
         assert_eq!(reading.notice, None, "{payload}");
+        // It cannot tell whether work still runs: it leaves that alone.
+        assert_eq!(reading.background, None, "{payload}");
     }
 }
 

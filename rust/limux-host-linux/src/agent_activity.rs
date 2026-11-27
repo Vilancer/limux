@@ -77,9 +77,10 @@ pub struct AgentEvent {
     /// A subagent of the session reported it (Claude Code's background
     /// agents), not the agent the user talks to.
     pub subagent: bool,
-    /// Idle, but it wakes up on its own: work still runs in the background
-    /// (a command it waits on) or a wake-up is scheduled.
-    pub background: bool,
+    /// Whether an idle agent wakes up on its own: work still runs in the
+    /// background (a command it waits on) or a wake-up is scheduled. Known at
+    /// the end of a turn; `None` keeps what the tab had (an idle reminder).
+    pub background: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,13 +188,22 @@ impl ActivityStore {
                     .map_or(event.subagent && phase.is_waiting(), |current| {
                         current.subagent_wait
                     });
+                // Paused on background work until a turn's end says otherwise.
+                let background = phase == AgentPhase::Idle
+                    && event.background.unwrap_or_else(|| {
+                        current.is_some_and(|current| {
+                            current.phase == AgentPhase::Idle
+                                && current.background
+                                && same_session(&current)
+                        })
+                    });
                 // The same phase of the same session keeps its start and line,
                 // but a turn that no longer waits on background work does not
                 // keep the line that named it.
                 let continued = current.filter(|current| {
                     current.phase == phase
                         && same_session(current)
-                        && current.background == event.background
+                        && current.background == background
                 });
                 let detail = waiting
                     .and_then(|current| current.detail.clone())
@@ -208,7 +218,7 @@ impl ActivityStore {
                     since_ms,
                     detail,
                     subagent_wait,
-                    background: event.background && phase == AgentPhase::Idle,
+                    background,
                 };
                 let changed = current.is_none_or(|current| {
                     current.phase != next.phase
@@ -627,7 +637,7 @@ mod tests {
             at_ms,
             detail: None,
             subagent: false,
-            background: false,
+            background: None,
         }
     }
 
@@ -1095,7 +1105,7 @@ mod tests {
     #[test]
     fn a_turn_paused_on_background_work_stays_out_of_close_quiet() {
         let paused = |at_ms, detail: &str| AgentEvent {
-            background: true,
+            background: Some(true),
             detail: Some(detail.to_string()),
             ..event("t", Some(AgentPhase::Idle), Some("s"), at_ms)
         };
@@ -1108,20 +1118,32 @@ mod tests {
         assert!(current.background);
         assert_eq!(current.detail.as_deref(), Some("Background: cargo test"));
         assert_eq!(store.idle_tabs(), ["done"]);
+        // Claude Code's idle reminder a minute later cannot tell: it stays.
+        assert!(!store.apply(event("t", Some(AgentPhase::Idle), Some("s"), 3)));
+        let current = store.get("t").unwrap();
+        assert!(current.background);
+        assert_eq!(current.detail.as_deref(), Some("Background: cargo test"));
         // It wakes up and ends its turn for good: done, and the line that
         // named the command goes with it.
-        assert!(store.apply(event("t", Some(AgentPhase::Idle), Some("s"), 3)));
+        assert!(store.apply(AgentEvent {
+            background: Some(false),
+            ..event("t", Some(AgentPhase::Idle), Some("s"), 4)
+        }));
         let current = store.get("t").unwrap();
         assert!(!current.background);
         assert_eq!(current.detail, None);
         let mut idle = store.idle_tabs();
         idle.sort_unstable();
         assert_eq!(idle, ["done", "t"]);
-        // Only an idle report pauses: a working one never carries it over.
+        // Only an idle report pauses: a working one never carries it over,
+        // and the reminder after it does not bring the pause back.
+        store.apply(paused(5, "Background: npm run dev"));
         store.apply(AgentEvent {
-            background: true,
-            ..event("t", Some(AgentPhase::Working), Some("s"), 4)
+            background: Some(true),
+            ..event("t", Some(AgentPhase::Working), Some("s"), 6)
         });
+        assert!(!store.get("t").unwrap().background);
+        store.apply(event("t", Some(AgentPhase::Idle), Some("s"), 7));
         assert!(!store.get("t").unwrap().background);
     }
 

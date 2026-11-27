@@ -3,8 +3,7 @@
 use serde_json::Value;
 
 use super::{
-    finished, last_said, payload_tool_detail, AgentProvider, AgentState, HookReading, Notice,
-    TITLE_CHARS,
+    last_said, payload_tool_detail, AgentProvider, AgentState, HookReading, Notice, TITLE_CHARS,
 };
 use crate::hook_str;
 
@@ -30,11 +29,7 @@ impl AgentProvider for Claude {
         match event {
             "Notification" | "notification" => notification(payload),
             "Stop" | "stop" => stop(payload),
-            "finished" => HookReading::notice(finished(
-                payload,
-                &["last_assistant_message"],
-                &["message", "reason"],
-            )),
+            "finished" => HookReading::notice(Notice::Finished(said(payload))),
             "SessionStart" | "session-start" => HookReading::state(AgentState::Idle),
             "UserPromptSubmit" | "prompt-submit" => HookReading::state(AgentState::Working)
                 .with_detail(hook_str(payload, &["prompt"]).map(str::to_owned)),
@@ -147,45 +142,40 @@ fn first_question(payload: &Value) -> Option<String> {
 /// it wakes up on its own when any of it ends or fires, so the turn's end is
 /// not always the end of the work.
 fn stop(payload: &Value) -> HookReading {
-    let said = || last_said(payload, &["last_assistant_message"], &["message", "reason"]);
     let (agents, commands) = in_flight(payload);
-    match (agents.as_slice(), commands.as_slice()) {
-        // Background agents report back soon: it keeps working.
-        ([one], _) => {
-            HookReading::state(AgentState::Working).with_detail(Some(format!("Waiting on: {one}")))
-        }
-        ([_, _, ..], _) => HookReading::state(AgentState::Working).with_detail(Some(format!(
-            "Waiting on {} background agents",
-            agents.len()
-        ))),
-        // A command or a monitor may run for hours (a server never ends), so
-        // it is quiet, but says what it waits on and is not "finished".
-        ([], [one]) => HookReading::state(AgentState::Idle)
-            .in_background()
-            .with_detail(Some(format!("Background: {one}")))
-            .with_notice(Notice::WaitingOn {
-                on: crate::one_line(one, TITLE_CHARS),
-                said: said(),
-            }),
-        ([], [_, _, ..]) => {
-            let on = format!("{} background commands", commands.len());
-            HookReading::state(AgentState::Idle)
-                .in_background()
-                .with_detail(Some(format!("Background: {on}")))
-                .with_notice(Notice::WaitingOn { on, said: said() })
-        }
-        ([], []) => {
-            let done = HookReading::state(AgentState::Idle).with_notice(finished(
-                payload,
-                &["last_assistant_message"],
-                &["message", "reason"],
-            ));
-            match wake_up(payload) {
-                Some(when) => done.in_background().with_detail(Some(when)),
-                None => done,
-            }
-        }
+    // Background agents report back soon: it keeps working.
+    if !agents.is_empty() {
+        let detail = match agents.as_slice() {
+            [one] => format!("Waiting on: {one}"),
+            many => format!("Waiting on {} background agents", many.len()),
+        };
+        return HookReading::state(AgentState::Working).with_detail(Some(detail));
     }
+    // A command or a monitor may run for hours (a server never ends), so it
+    // is quiet, but says what it waits on and is not "finished".
+    if !commands.is_empty() {
+        let on = match commands.as_slice() {
+            [one] => crate::one_line(one, TITLE_CHARS),
+            many => format!("{} background commands", many.len()),
+        };
+        return HookReading::state(AgentState::Idle)
+            .in_background(true)
+            .with_detail(Some(format!("Background: {on}")))
+            .with_notice(Notice::WaitingOn {
+                on,
+                said: said(payload),
+            });
+    }
+    let done = HookReading::state(AgentState::Idle).with_notice(Notice::Finished(said(payload)));
+    match wake_up(payload) {
+        Some(when) => done.in_background(true).with_detail(Some(when)),
+        None => done.in_background(false),
+    }
+}
+
+/// The first line of what Claude last said, for a notification.
+fn said(payload: &Value) -> String {
+    last_said(payload, &["last_assistant_message"], &["message", "reason"])
 }
 
 /// The session's work still in flight (running or pending): background
@@ -213,10 +203,12 @@ fn in_flight(payload: &Value) -> (Vec<&str>, Vec<&str>) {
 /// session back: "Wakes at 14:30" for a one-shot whose cron names a time of
 /// day, else "Wakes on a schedule".
 fn wake_up(payload: &Value) -> Option<String> {
-    let crons = payload
-        .get("session_crons")
-        .and_then(Value::as_array)
-        .filter(|crons| !crons.is_empty())?;
+    let crons = payload.get("session_crons").and_then(Value::as_array)?;
+    if crons.is_empty() {
+        return None;
+    }
+    // Only a one-shot names a time; a recurring one (or one that does not
+    // say) fires again and again.
     let at = crons
         .iter()
         .filter(|cron| cron.get("recurring").and_then(Value::as_bool) == Some(false))
